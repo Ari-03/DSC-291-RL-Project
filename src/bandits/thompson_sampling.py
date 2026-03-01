@@ -18,8 +18,8 @@ class ThompsonSampling(ContextualBandit):
         try:
             L = cholesky(self.v**2 * self.A_inv, lower=True)  # (d, d)
         except np.linalg.LinAlgError:
-            # Fallback if A_inv is not PD (numerical issues) -- add small jitter
-            jittered = self.v**2 * self.A_inv + 1e-8 * np.eye(self.d)
+            # Fallback if A_inv is not PD (numerical issues) -- scale-adaptive jitter
+            jittered = self.v**2 * self.A_inv + 1e-6 * np.trace(self.A_inv) / self.d * np.eye(self.d)
             L = cholesky(jittered, lower=True)
 
         z = rng.randn(self.d)

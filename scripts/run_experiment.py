@@ -69,28 +69,6 @@ def build_algorithms(d: int, lam: float) -> list[ContextualBandit]:
     ]
 
 
-def run_single(
-    algo: ContextualBandit,
-    sequence: list,
-    env: AnimeRecommendationEnv,
-    T: int,
-) -> ExperimentTracker:
-    """Run one algorithm on a pre-generated sequence."""
-    tracker = ExperimentTracker(algo.name, T)
-    algo.reset()
-
-    for t in range(T):
-        username, anime_ids, contexts = sequence[t]
-        arm_idx = algo.select_arm(contexts, np.random.RandomState(t))  # deterministic per round
-        chosen_anime = anime_ids[arm_idx]
-        reward = env.get_reward(username, chosen_anime)
-        oracle = env.oracle_reward(username, anime_ids)
-        algo.update(contexts[arm_idx], reward)
-        tracker.log(reward, oracle)
-
-    return tracker
-
-
 def main():
     print("=" * 60)
     print("Contextual Bandits for Anime Recommendation")
@@ -133,6 +111,7 @@ def main():
 
     # results: algo_name -> list of ExperimentTracker (one per seed)
     results: dict[str, list[ExperimentTracker]] = {a.name: [] for a in algorithms}
+    algo_idx = {a.name: i for i, a in enumerate(algorithms)}
 
     for seed in CONFIG["seeds"]:
         print(f"\n  Seed {seed}: generating sequence...")
@@ -140,8 +119,8 @@ def main():
 
         for algo in algorithms:
             start = time.time()
-            # Use per-algorithm RNG that depends on seed for reproducibility
-            algo_rng_seed = seed * 1000 + hash(algo.name) % 1000
+            # Use per-algorithm RNG with deterministic index (hash() is session-random)
+            algo_rng_seed = seed * 1000 + algo_idx[algo.name]
             # Patch the select_arm call to use a proper RNG
             tracker = _run_with_rng(algo, sequence, env, CONFIG["T"], algo_rng_seed)
             elapsed = time.time() - start
