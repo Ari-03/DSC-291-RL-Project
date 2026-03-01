@@ -8,8 +8,8 @@ import numpy as np
 class ContextualBandit(ABC):
     """Base class with shared ridge regression sufficient statistics.
 
-    Maintains A = X^T X + lambda*I, b = X^T y, and A_inv via Sherman-Morrison
-    rank-1 updates for O(d^2) per step.
+    Maintains b = X^T y and A_inv via Sherman-Morrison rank-1 updates
+    for O(d^2) per step.
     """
 
     def __init__(self, d: int, lam: float = 1.0):
@@ -19,7 +19,6 @@ class ContextualBandit(ABC):
 
     def reset(self):
         """Reset to initial state for multi-seed experiments."""
-        self.A = self.lam * np.eye(self.d)
         self.b = np.zeros(self.d)
         self.A_inv = (1.0 / self.lam) * np.eye(self.d)
         self.theta_hat = np.zeros(self.d)
@@ -40,8 +39,7 @@ class ContextualBandit(ABC):
         denom = 1.0 + x @ Ainv_x                       # scalar
         self.A_inv -= np.outer(Ainv_x, Ainv_x) / denom # (d, d)
 
-        # Update A and b
-        self.A += np.outer(x, x)
+        # Update b
         self.b += reward * x
 
         # Recompute theta_hat

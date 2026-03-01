@@ -44,12 +44,14 @@ class FeatureBuilder:
 
         # Compute normalization stats from training data
         self._compute_normalization_stats()
-        # Precompute static anime features
-        self._anime_features: dict[int, np.ndarray] = {}
+        # Precompute genre vecs first (used by _build_anime_features)
         self._anime_genre_vec: dict[int, np.ndarray] = {}
         for aid in self.anime_df.index:
-            self._anime_features[aid] = self._build_anime_features(aid)
             self._anime_genre_vec[aid] = self._build_genre_vec(aid)
+        # Precompute static anime features (uses cached genre vecs)
+        self._anime_features: dict[int, np.ndarray] = {}
+        for aid in self.anime_df.index:
+            self._anime_features[aid] = self._build_anime_features(aid)
 
         # Precompute user features and genre profiles
         self._user_features: dict[str, np.ndarray] = {}
@@ -58,11 +60,22 @@ class FeatureBuilder:
             self._user_features[uname] = self._build_user_features(uname)
             self._user_genre_profile[uname] = self._build_user_genre_profile(uname)
 
+        # Cache genre vector norms (static, used in build_context hot path)
+        self._user_genre_norm: dict[str, float] = {u: np.linalg.norm(v) for u, v in self._user_genre_profile.items()}
+        self._anime_genre_norm: dict[int, float] = {a: np.linalg.norm(v) for a, v in self._anime_genre_vec.items()}
+
+        # Cache DataFrame lookup values (avoid .loc in tight loop)
+        self._user_mean_score: dict[str, float] = {u: self.users_df.loc[u, "stats_mean_score"] for u in self.users_df.index}
+        self._anime_score: dict[int, float] = {a: self.anime_df.loc[a, "score"] for a in self.anime_df.index}
+
         self._d = self._compute_dim()
 
     @property
     def dim(self) -> int:
         return self._d
+
+    def has_anime(self, anime_id: int) -> bool:
+        return anime_id in self._anime_features
 
     def _compute_normalization_stats(self):
         """Compute means and stds for normalization."""
@@ -116,8 +129,8 @@ class FeatureBuilder:
         """
         row = self.anime_df.loc[anime_id]
 
-        # Genre multi-hot
-        genre = self._build_genre_vec(anime_id)
+        # Genre multi-hot (use precomputed)
+        genre = self._anime_genre_vec[anime_id]
 
         # Normalized continuous
         score = (row["score"] - self.anime_score_mean) / self.anime_score_std
@@ -174,16 +187,16 @@ class FeatureBuilder:
         anime_genre = self._anime_genre_vec[anime_id]
 
         # Genre overlap cosine similarity
-        norm_u = np.linalg.norm(user_genre)
-        norm_a = np.linalg.norm(anime_genre)
+        norm_u = self._user_genre_norm[username]
+        norm_a = self._anime_genre_norm[anime_id]
         if norm_u > 0 and norm_a > 0:
             genre_cos = np.dot(user_genre, anime_genre) / (norm_u * norm_a)
         else:
             genre_cos = 0.0
 
         # Score deviation: user_mean - anime_score (both raw, normalized)
-        user_mean = self.users_df.loc[username, "stats_mean_score"]
-        anime_score = self.anime_df.loc[anime_id, "score"]
+        user_mean = self._user_mean_score[username]
+        anime_score = self._anime_score[anime_id]
         score_dev = (user_mean - anime_score) / self.anime_score_std
 
         interaction = np.array([genre_cos, score_dev], dtype=np.float64)

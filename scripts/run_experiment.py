@@ -161,11 +161,10 @@ def _run_with_rng(
     rng = np.random.RandomState(rng_seed)
 
     for t in tqdm(range(T), desc=f"    {algo.name:25s}", leave=False, ncols=80):
-        username, anime_ids, contexts = sequence[t]
+        username, anime_ids, contexts, oracle = sequence[t]
         arm_idx = algo.select_arm(contexts, rng)
         chosen_anime = anime_ids[arm_idx]
         reward = env.get_reward(username, chosen_anime)
-        oracle = env.oracle_reward(username, anime_ids)
         algo.update(contexts[arm_idx], reward)
         tracker.log(reward, oracle)
 

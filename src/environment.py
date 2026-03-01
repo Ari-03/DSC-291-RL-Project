@@ -34,7 +34,7 @@ class AnimeRecommendationEnv:
         for u in users:
             rated = rating_map.get(u, {})
             # Only include anime for which we have precomputed features
-            valid = [aid for aid in rated if aid in self.fb._anime_features]
+            valid = [aid for aid in rated if self.fb.has_anime(aid)]
             if len(valid) >= K:
                 self._user_anime[u] = valid
         self.valid_users = sorted(self._user_anime.keys())
@@ -66,7 +66,16 @@ class AnimeRecommendationEnv:
         """Best possible reward among the K candidates."""
         return max(self._reward(self.rating_map[username][aid]) for aid in anime_ids)
 
-    def generate_sequence(self, T: int, seed: int) -> list[tuple[str, list[int], np.ndarray]]:
-        """Pre-generate T rounds for fair comparison across algorithms."""
+    def generate_sequence(self, T: int, seed: int) -> list[tuple[str, list[int], np.ndarray, float]]:
+        """Pre-generate T rounds for fair comparison across algorithms.
+
+        Each tuple contains (username, anime_ids, contexts, oracle_reward).
+        Oracle is pre-computed once here instead of per-algorithm.
+        """
         rng = np.random.RandomState(seed)
-        return [self.step(rng) for _ in range(T)]
+        seq = []
+        for _ in range(T):
+            user, anime_ids, contexts = self.step(rng)
+            oracle = self.oracle_reward(user, anime_ids)
+            seq.append((user, anime_ids, contexts, oracle))
+        return seq
