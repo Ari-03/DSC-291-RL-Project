@@ -11,7 +11,7 @@ from tqdm import tqdm
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data_loader import load_all
+from src.data_loader import load_all, split_rating_map, compute_user_means
 from src.feature_engineering import FeatureBuilder
 from src.environment import AnimeRecommendationEnv
 from src.bandits import EpsilonGreedy, DecayingEpsilonGreedy, LinUCB, ThompsonSampling
@@ -29,7 +29,7 @@ CONFIG = {
     "min_ratings": 20,
     "min_anime_ratings": 50,
     "lam": 0.1,
-    "warm_start_n": 5000,  # samples for warm-start ridge regression
+    "warm_start_n": 10000,  # samples for warm-start ridge regression
     "binary_threshold": 7,
     "reward_type": "continuous",  # "continuous" or "binary"
 }
@@ -73,12 +73,20 @@ def build_algorithms(d: int, lam: float) -> list[ContextualBandit]:
     ]
 
 
-def build_baselines(rating_map: dict[str, dict[int, int]]) -> list[OfflineBaseline]:
-    """Instantiate offline CF baselines (these see the full rating matrix)."""
+def build_baselines(
+    rating_map_train: dict[str, dict[int, int]],
+    rating_map_test: dict[str, dict[int, int]],
+) -> list[OfflineBaseline]:
+    """Instantiate offline CF baselines (trained on train split only)."""
+    # Extract test anime per user for UserCF precomputation
+    predict_for_anime: dict[str, set[int]] = {}
+    for u, test_ratings in rating_map_test.items():
+        if test_ratings:
+            predict_for_anime[u] = set(test_ratings.keys())
     return [
-        PopularityBaseline(rating_map),
-        SVDBaseline(rating_map),
-        UserCFBaseline(rating_map),
+        PopularityBaseline(rating_map_train),
+        SVDBaseline(rating_map_train),
+        UserCFBaseline(rating_map_train, predict_for_anime=predict_for_anime),
     ]
 
 
@@ -98,29 +106,39 @@ def main():
     print(f"  Users: {len(data['sampled_users'])}, Anime: {len(data['candidate_anime_ids'])}")
     print(f"  Interactions: {len(data['interactions'])}")
 
-    # Build features
+    # Train/test split (per user, 70/30)
+    print("\n  Splitting ratings 70/30 per user...")
+    rating_map_train, rating_map_test = split_rating_map(data["rating_map"], test_frac=0.3, seed=42)
+    user_means = compute_user_means(rating_map_train)
+    _train_total = sum(len(r) for r in rating_map_train.values())
+    _test_total = sum(len(r) for r in rating_map_test.values())
+    print(f"  Train ratings: {_train_total}, Test ratings: {_test_total}")
+
+    # Build features (using training data only)
     print("\n[2/5] Building feature vectors...")
-    fb = FeatureBuilder(data["anime_df"], data["users_df"], data["rating_map"])
+    fb = FeatureBuilder(data["anime_df"], data["users_df"], rating_map_train)
     d = fb.dim
     print(f"  Feature dimension: {d}")
 
-    # Create environment
+    # Create environment (using test data for rewards, centered by train means)
     print("\n[3/5] Setting up environment...")
     env = AnimeRecommendationEnv(
         feature_builder=fb,
-        rating_map=data["rating_map"],
+        rating_map=rating_map_test,
         users=data["sampled_users"],
         K=CONFIG["K"],
         binary_threshold=CONFIG["binary_threshold"],
         reward_type=CONFIG["reward_type"],
+        user_means=user_means,
     )
     print(f"  Valid users for K={CONFIG['K']}: {len(env.valid_users)}")
 
-    # Warm-start: fit offline ridge regression on a sample of interactions
+    # Warm-start: fit offline ridge regression on training data (with centering)
     print("\n[4/5] Computing warm-start from offline data...")
     warm_theta, warm_A_inv, warm_b = _compute_warm_start(
-        fb, data["rating_map"], CONFIG["lam"], CONFIG["warm_start_n"],
+        fb, rating_map_train, CONFIG["lam"], CONFIG["warm_start_n"],
         reward_type=CONFIG["reward_type"],
+        user_means=user_means,
     )
     print(f"  Warm-start fitted on {CONFIG['warm_start_n']} samples")
 
@@ -128,7 +146,7 @@ def main():
     print(f"\n[5/5] Running experiments (T={CONFIG['T']}, {len(CONFIG['seeds'])} seeds)...")
     algorithms = build_algorithms(d, CONFIG["lam"])
     print("  Building offline baselines (may take a minute)...")
-    baselines = build_baselines(data["rating_map"])
+    baselines = build_baselines(rating_map_train, rating_map_test)
     all_policies: list[ContextualBandit | OfflineBaseline] = algorithms + baselines
     algo_names = [a.name for a in all_policies]
     print(f"  Policies: {algo_names}")
@@ -181,6 +199,7 @@ def _compute_warm_start(
     lam: float,
     n_samples: int,
     reward_type: str = "continuous",
+    user_means: dict[str, float] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Fit ridge regression on a sample of (user, anime, rating) triples."""
     rng = np.random.RandomState(42)
@@ -203,6 +222,8 @@ def _compute_warm_start(
         X[i] = fb.build_context(u, aid)
         if reward_type == "binary":
             y[i] = 1.0 if rating >= 7 else 0.0
+        elif user_means is not None:
+            y[i] = (rating - user_means.get(u, 5.0)) / 10.0
         else:
             y[i] = rating / 10.0
 

@@ -118,7 +118,8 @@ def slide_data(mo):
     **MyAnimeList Dataset:**
     - **5,000 users** (subsampled, each with ≥ 20 rated anime)
     - **~3,100 anime** (each with ≥ 50 ratings among sampled users)
-    - **~940K rated interactions** used as ground truth
+    - **~940K rated interactions**, split **70/30 per user** into train/test
+    - Train set: features, warm-start, CF baselines | Test set: environment rewards
 
     **Context vector** $\mathbf{x} \in \mathbb{R}^{72}$ — three blocks:
 
@@ -171,8 +172,9 @@ def slide_setup(mo):
     | Random seeds | 5 (for mean ± SE) |
     | Feature dimension $d$ | 72 |
     | Ridge regularization $\lambda$ | 0.1 |
-    | Warm-start | Ridge regression on 5,000 offline samples |
-    | Reward | Continuous: rating / 10 ∈ [0, 1] |
+    | Train/test split | 70/30 per user |
+    | Warm-start | Ridge regression on 10,000 offline samples |
+    | Reward | User-centered: (rating − user_mean) / 10 |
 
     **Algorithms tested:**
 
@@ -185,7 +187,7 @@ def slide_setup(mo):
     | Thompson Sampling | v ∈ {0.1, 0.5} |
     | **Offline CF baselines** | Popularity, SVD, UserCF |
 
-    **Fair comparison:** All algorithms see the **same user/candidate sequence** per seed. CF baselines see the full rating matrix upfront.
+    **Fair comparison:** All algorithms see the **same user/candidate sequence** per seed. CF baselines are trained on 70% of ratings; rewards come from the held-out 30%.
     """)
     return
 
@@ -193,10 +195,11 @@ def slide_setup(mo):
 @app.cell
 def slide_why_random(go, mo, np):
     """Why does Random's % of oracle decrease with K?"""
-    from src.data_loader import load_all as _load_all
+    from src.data_loader import load_all as _load_all, split_rating_map as _split_rm
 
     _data = _load_all()
-    _rating_map = _data["rating_map"]
+    _rm_train, _rm_test = _split_rm(_data["rating_map"], test_frac=0.3, seed=42)
+    _rating_map = _rm_test  # use test ratings (what the environment uses)
 
     # Collect all ratings
     _all_ratings = []
@@ -395,7 +398,7 @@ def slide_results_regret(COLORS, all_results, go, make_subplots, mo, np):
 @app.cell
 def _(np):
     """Shared computation: train LinUCB and log uncertainty metrics."""
-    from src.data_loader import load_all as _load_all
+    from src.data_loader import load_all as _load_all, split_rating_map as _split, compute_user_means as _compute_means
     from src.feature_engineering import (
         FeatureBuilder as _FeatureBuilder,
         ALL_GENRES as _ALL_GENRES,
@@ -406,8 +409,10 @@ def _(np):
     from src.bandits import LinUCB as _LinUCB
 
     _data = _load_all()
-    _fb = _FeatureBuilder(_data["anime_df"], _data["users_df"], _data["rating_map"])
-    _env = _Env(_fb, _data["rating_map"], _data["sampled_users"], K=50, reward_type="continuous")
+    _rm_train, _rm_test = _split(_data["rating_map"], test_frac=0.3, seed=42)
+    _umeans = _compute_means(_rm_train)
+    _fb = _FeatureBuilder(_data["anime_df"], _data["users_df"], _rm_train)
+    _env = _Env(_fb, _rm_test, _data["sampled_users"], K=50, reward_type="continuous", user_means=_umeans)
     _seq = _env.generate_sequence(T=50_000, seed=0)
 
     _agent = _LinUCB(_fb.dim, alpha=0.5, lam=0.1)
@@ -864,17 +869,17 @@ def slide_bandits_vs_cf(COLORS, all_results, go, make_subplots, mo, np):
     if _linucb_pct > 0 and _ucf_pct > 0:
         _diff = _linucb_pct - _ucf_pct
         if abs(_diff) < 1.0:
-            _comparison = f"LinUCB ({_linucb_pct:.1f}%) ≈ UserCF ({_ucf_pct:.1f}%) — **online bandits match pretrained CF** despite starting from scratch, and they can adapt to preference drift."
+            _comparison = f"LinUCB ({_linucb_pct:.1f}%) ≈ UserCF ({_ucf_pct:.1f}%) — **online bandits match CF** in a fair train/test evaluation."
         elif _diff > 0:
-            _comparison = f"LinUCB ({_linucb_pct:.1f}%) > UserCF ({_ucf_pct:.1f}%) — **online bandits outperform pretrained CF**, a strong result given bandits start from zero."
+            _comparison = f"LinUCB ({_linucb_pct:.1f}%) > UserCF ({_ucf_pct:.1f}%) — **online bandits outperform CF** when CF must generalize to unseen ratings."
         else:
-            _comparison = f"UserCF ({_ucf_pct:.1f}%) > LinUCB ({_linucb_pct:.1f}%) — CF has an offline advantage, but bandits **close the gap over time** and handle cold-start / non-stationarity."
+            _comparison = f"UserCF ({_ucf_pct:.1f}%) > LinUCB ({_linucb_pct:.1f}%) — CF retains an edge, but bandits **close the gap** and handle cold-start / non-stationarity."
 
     mo.md(f"""
     ## Bandits vs. Collaborative Filtering
 
-    **Key caveat:** CF baselines see the **entire 940K-interaction rating matrix** upfront.
-    Bandits start from scratch and learn online. This is an **unfair comparison by design** — if bandits match CF, it's a strong result.
+    **Fair evaluation:** CF baselines are trained on 70% of each user's ratings; rewards come from the held-out 30%.
+    CF must **generalize** — it can no longer memorize the test set. Bandits learn online with user-centered rewards.
 
     {_comparison}
 
@@ -971,15 +976,17 @@ def _(all_results, go, mo, np):
 
 @app.cell
 def slide_examples(mo, np):
-    from src.data_loader import load_all as _load_all
+    from src.data_loader import load_all as _load_all, split_rating_map as _split_ex, compute_user_means as _means_ex
     from src.feature_engineering import FeatureBuilder as _FeatureBuilder
     from src.bandits import LinUCB as _LinUCB
 
     _data = _load_all()
-    _fb = _FeatureBuilder(_data["anime_df"], _data["users_df"], _data["rating_map"])
+    _rm_train_ex, _rm_test_ex = _split_ex(_data["rating_map"], test_frac=0.3, seed=42)
+    _umeans_ex = _means_ex(_rm_train_ex)
+    _fb = _FeatureBuilder(_data["anime_df"], _data["users_df"], _rm_train_ex)
     _anime_df = _data["anime_df"].set_index("anime_id")
 
-    _rating_map = _data["rating_map"]
+    _rating_map = _rm_test_ex
     _example_user = sorted(_rating_map.keys())[0]
     _user_ratings = _rating_map[_example_user]
 
@@ -989,13 +996,13 @@ def slide_examples(mo, np):
     _all_users = _data["sampled_users"]
     for _ in range(1000):
         _u = _all_users[_rng.randint(len(_all_users))]
-        _u_ratings = _rating_map[_u]
+        _u_ratings = _rm_train_ex.get(_u, {})
         _aids = [_a for _a in _u_ratings if _a in _fb._anime_features]
         if len(_aids) < 2:
             continue
         _aid = _aids[_rng.randint(len(_aids))]
         _xv = _fb.build_context(_u, _aid)
-        _r = _u_ratings[_aid] / 10.0
+        _r = (_u_ratings[_aid] - _umeans_ex.get(_u, 5.0)) / 10.0
         _agent.update(_xv, _r)
 
     _user_anime = [_a for _a in _user_ratings if _a in _fb._anime_features]
@@ -1073,10 +1080,10 @@ def slide_conclusion(all_results, mo, np):
 
     **Key takeaways:**
     - **Sublinear regret confirmed:** Fitted growth rates show LinUCB/TS achieve $\\alpha \\approx 0.5$–$0.7$ (sublinear), while Random has $\\alpha \\approx 1$ (linear) — matching the theoretical $O(d\\sqrt{{T}})$ bound
-    - **K=50 widens the gap:** With more arms, Random drops significantly while bandits maintain high oracle %, creating a much clearer separation
-    - **Interaction features + warm-start** give bandits richer signal and a head start, pushing them closer to oracle performance
+    - **Fair evaluation via train/test split:** CF baselines trained on 70% of ratings, evaluated on held-out 30% — no data leakage
+    - **User-centered rewards** remove per-user bias so the linear model learns relative preferences, not absolute ratings
     - **Structured > undirected exploration:** UCB bonus and posterior sampling outperform $\\varepsilon$-Greedy; decaying $\\varepsilon$-greedy bridges the gap by reducing exploration over time
-    - **Competitive with CF baselines:** Online bandits match or exceed pretrained collaborative filtering (Popularity, SVD, UserCF) despite starting from scratch — and offer cold-start/non-stationarity advantages CF cannot
+    - **Competitive with CF baselines:** With fair evaluation, online bandits are competitive with collaborative filtering — and offer cold-start/non-stationarity advantages CF cannot
 
     **Future directions:**
     - **Non-stationarity:** user preferences drift over time → sliding-window or discounted bandits

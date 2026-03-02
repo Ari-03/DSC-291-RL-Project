@@ -21,6 +21,7 @@ class AnimeRecommendationEnv:
         K: int = 20,
         binary_threshold: int = 7,
         reward_type: str = "continuous",
+        user_means: dict[str, float] | None = None,
     ):
         self.fb = feature_builder
         self.rating_map = rating_map
@@ -28,6 +29,7 @@ class AnimeRecommendationEnv:
         self.K = K
         self.binary_threshold = binary_threshold
         self.reward_type = reward_type
+        self._user_means = user_means
 
         # Precompute per-user anime lists for fast sampling
         self._user_anime: dict[str, list[int]] = {}
@@ -39,9 +41,12 @@ class AnimeRecommendationEnv:
                 self._user_anime[u] = valid
         self.valid_users = sorted(self._user_anime.keys())
 
-    def _reward(self, rating: int) -> float:
+    def _reward(self, username: str, rating: int) -> float:
         if self.reward_type == "binary":
             return 1.0 if rating >= self.binary_threshold else 0.0
+        if self._user_means is not None:
+            user_mean = self._user_means.get(username, 5.0)
+            return (rating - user_mean) / 10.0
         return rating / 10.0
 
     def step(self, rng: np.random.RandomState) -> tuple[str, list[int], np.ndarray]:
@@ -60,11 +65,11 @@ class AnimeRecommendationEnv:
     def get_reward(self, username: str, anime_id: int) -> float:
         """Get reward for a (user, anime) pair."""
         rating = self.rating_map[username][anime_id]
-        return self._reward(rating)
+        return self._reward(username, rating)
 
     def oracle_reward(self, username: str, anime_ids: list[int]) -> float:
         """Best possible reward among the K candidates."""
-        return max(self._reward(self.rating_map[username][aid]) for aid in anime_ids)
+        return max(self._reward(username, self.rating_map[username][aid]) for aid in anime_ids)
 
     def generate_sequence(self, T: int, seed: int) -> list[tuple[str, list[int], np.ndarray, float]]:
         """Pre-generate T rounds for fair comparison across algorithms.

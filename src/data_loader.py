@@ -112,6 +112,51 @@ def build_rating_map(interactions: pd.DataFrame) -> dict[str, dict[int, int]]:
     return rating_map
 
 
+def split_rating_map(
+    rating_map: dict[str, dict[int, int]],
+    test_frac: float = 0.3,
+    seed: int = 42,
+) -> tuple[dict[str, dict[int, int]], dict[str, dict[int, int]]]:
+    """Split each user's ratings into train/test sets.
+
+    For each user, randomly assign test_frac of their rated anime to the test
+    set and the rest to the train set.
+
+    Returns:
+        (train_map, test_map)
+    """
+    rng = np.random.RandomState(seed)
+    train_map: dict[str, dict[int, int]] = {}
+    test_map: dict[str, dict[int, int]] = {}
+
+    for username, ratings in rating_map.items():
+        anime_ids = sorted(ratings.keys())  # deterministic ordering
+        n_test = max(1, int(len(anime_ids) * test_frac))
+        perm = rng.permutation(len(anime_ids))
+        test_indices = set(perm[:n_test].tolist())
+
+        train_map[username] = {}
+        test_map[username] = {}
+        for i, aid in enumerate(anime_ids):
+            if i in test_indices:
+                test_map[username][aid] = ratings[aid]
+            else:
+                train_map[username][aid] = ratings[aid]
+
+    return train_map, test_map
+
+
+def compute_user_means(rating_map: dict[str, dict[int, int]]) -> dict[str, float]:
+    """Compute mean rating per user from the given rating map."""
+    user_means: dict[str, float] = {}
+    for username, ratings in rating_map.items():
+        if ratings:
+            user_means[username] = np.mean(list(ratings.values()))
+        else:
+            user_means[username] = 5.0  # fallback
+    return user_means
+
+
 def load_all(
     n_users: int = 5000,
     min_ratings: int = 20,

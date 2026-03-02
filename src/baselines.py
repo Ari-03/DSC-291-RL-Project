@@ -1,8 +1,8 @@
 """Offline baselines for comparison: Popularity, SVD-CF, UserCF.
 
-These baselines have an unfair advantage — they see the entire rating matrix
-upfront, while bandits start from scratch. If bandits match or exceed CF
-after T rounds, that's a strong result.
+These baselines are trained on the training split (70% of each user's
+ratings) and evaluated on the held-out test split. This is a fair
+comparison — CF methods must generalize, not memorize.
 """
 
 from abc import ABC, abstractmethod
@@ -126,7 +126,12 @@ class SVDBaseline(OfflineBaseline):
 class UserCFBaseline(OfflineBaseline):
     """User-based collaborative filtering with cosine similarity."""
 
-    def __init__(self, rating_map: dict[str, dict[int, int]], k_neighbors: int = 50):
+    def __init__(
+        self,
+        rating_map: dict[str, dict[int, int]],
+        k_neighbors: int = 50,
+        predict_for_anime: dict[str, set[int]] | None = None,
+    ):
         users = sorted(rating_map.keys())
         all_anime: set[int] = set()
         for ur in rating_map.values():
@@ -162,6 +167,7 @@ class UserCFBaseline(OfflineBaseline):
         np.fill_diagonal(S, 0.0)
 
         # Precompute predictions for all (user, anime) pairs in rating_map
+        # plus any extra test anime from predict_for_anime
         # For each user, only keep top-k neighbors for efficiency
         self._pred: dict[str, dict[int, float]] = {}
         for u, ur in rating_map.items():
@@ -173,9 +179,16 @@ class UserCFBaseline(OfflineBaseline):
             else:
                 top_k = np.arange(n_users)
 
+            # Predict for train anime + any extra test anime
+            anime_to_predict = set(ur.keys())
+            if predict_for_anime:
+                anime_to_predict |= predict_for_anime.get(u, set())
+
             user_preds: dict[int, float] = {}
-            for aid in ur:
-                ai = anime_idx[aid]
+            for aid in anime_to_predict:
+                ai = anime_idx.get(aid)
+                if ai is None:
+                    continue  # anime not in training matrix, skip
                 # Get neighbors who rated this anime
                 col = R[:, ai].toarray().ravel()
                 mask = (col[top_k] != 0)
