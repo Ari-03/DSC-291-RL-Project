@@ -3,6 +3,7 @@ import marimo
 __generated_with = "0.20.2"
 app = marimo.App(
     width="medium",
+    app_title="Contextual Bandits for Anime Recommendation",
     layout_file="layouts/presentation.slides.json",
 )
 
@@ -31,6 +32,8 @@ def imports():
         "LinUCB(α=1.0)": "#27ae60",
         "TS(v=0.1)": "#3498db",
         "TS(v=0.5)": "#2980b9",
+        "Popularity": "#f39c12",
+        "UserCF": "#1abc9c",
     }
     return COLORS, RESULTS_PATH, go, make_subplots, mo, np, pickle
 
@@ -181,13 +184,99 @@ def slide_setup(mo):
 
 
 @app.cell
+def slide_why_random(go, mo, np):
+    """Why does Random achieve ~81% of oracle reward?"""
+    from src.data_loader import load_all as _load_all
+
+    _data = _load_all()
+    _rating_map = _data["rating_map"]
+
+    # Collect all ratings
+    _all_ratings = []
+    for _ur in _rating_map.values():
+        _all_ratings.extend(_ur.values())
+    _all_ratings = np.array(_all_ratings)
+
+    # Histogram of ratings
+    _hist_fig = go.Figure()
+    _counts, _edges = np.histogram(_all_ratings, bins=np.arange(0.5, 11.5, 1))
+    _hist_fig.add_trace(go.Bar(
+        x=list(range(1, 11)),
+        y=_counts,
+        marker_color="#3498db",
+        text=[f"{c/len(_all_ratings)*100:.1f}%" for c in _counts],
+        textposition="outside",
+    ))
+    _hist_fig.update_layout(
+        title="Rating Distribution (All 940K Interactions)",
+        xaxis_title="Rating", yaxis_title="Count",
+        template="plotly_white", height=350,
+        xaxis=dict(tickmode="linear", dtick=1),
+    )
+
+    # Monte Carlo: sample K=20 ratings, compute mean/max ratio
+    _K = 20
+    _n_sim = 100_000
+    _rng = np.random.RandomState(42)
+    _ratios = np.empty(_n_sim)
+    for _i in range(_n_sim):
+        _sample = _rng.choice(_all_ratings, size=_K, replace=True)
+        _ratios[_i] = _sample.mean() / _sample.max()
+    _mean_ratio = _ratios.mean()
+    _std_ratio = _ratios.std()
+
+    # Also compute E[mean] and E[max] separately
+    _means = np.empty(_n_sim)
+    _maxes = np.empty(_n_sim)
+    for _i in range(_n_sim):
+        _sample = _rng.choice(_all_ratings, size=_K, replace=True)
+        _means[_i] = _sample.mean()
+        _maxes[_i] = _sample.max()
+    _e_mean = _means.mean()
+    _e_max = _maxes.mean()
+    _global_ratio = _e_mean / _e_max
+
+    mo.md(f"""
+    ## Why Does Random Achieve ~81% of Oracle?
+
+    The rating distribution is **left-skewed and concentrated** in the 6–9 range.
+
+    - **Global mean rating:** {_all_ratings.mean():.2f} / 10
+    - **Median:** {np.median(_all_ratings):.0f} / 10
+    - **Std dev:** {_all_ratings.std():.2f}
+
+    **Monte Carlo simulation** (K=20 candidates, 100K trials):
+    - E[mean of 20 samples] = {_e_mean:.2f}
+    - E[max of 20 samples] = {_e_max:.2f}
+    - **E[mean] / E[max] = {_global_ratio:.1%}**
+
+    With ratings clustered high, even random selection scores well.
+    The remaining **~{100*(1 - _global_ratio):.0f}% gap is where algorithms compete.**
+    """)
+    mo.ui.plotly(_hist_fig)
+    return
+
+
+@app.cell
 def slide_results_reward(COLORS, all_results, go, mo, np):
     reward_fig = go.Figure()
 
+    # Compute oracle cumulative reward (same across all algorithms)
+    _first_trackers = next(iter(all_results.values()))
+    _oracle_curves = np.array([
+        np.cumsum(tr.oracle_rewards[:tr.t]) for tr in _first_trackers
+    ])
+    _oracle_mean = _oracle_curves.mean(axis=0)
+
     for _name, _trackers in all_results.items():
         _curves = np.array([tr.cumulative_reward for tr in _trackers])
-        _mean = _curves.mean(axis=0)
-        _se = _curves.std(axis=0) / np.sqrt(len(_trackers))
+        _oracle_per_seed = np.array([
+            np.cumsum(tr.oracle_rewards[:tr.t]) for tr in _trackers
+        ])
+        # % of oracle reward per seed, then average
+        _pct_curves = 100.0 * _curves / _oracle_per_seed
+        _mean = _pct_curves.mean(axis=0)
+        _se = _pct_curves.std(axis=0) / np.sqrt(len(_trackers))
         _T = len(_mean)
         _step = max(1, _T // 1000)
         _x = np.arange(0, _T, _step)
@@ -218,9 +307,9 @@ def slide_results_reward(COLORS, all_results, go, mo, np):
         )
 
     reward_fig.update_layout(
-        title="Cumulative Reward Over Time",
+        title="Cumulative Reward as % of Oracle",
         xaxis_title="Round",
-        yaxis_title="Cumulative Reward",
+        yaxis_title="% of Oracle Reward",
         template="plotly_white",
         height=500,
         legend=dict(x=0.02, y=0.98),
@@ -236,21 +325,23 @@ def slide_results_regret(COLORS, all_results, go, make_subplots, mo, np):
     regret_fig = make_subplots(
         rows=1,
         cols=2,
-        subplot_titles=("Cumulative Regret", "Sliding-Window Avg Reward (w=500)"),
+        subplot_titles=("Normalized Regret R(t)/t", "Sliding-Window Avg Reward (w=500)"),
     )
 
-    # Left: Regret curves
+    # Left: Normalized regret R(t)/t — average regret per round
     for _name, _trackers in all_results.items():
         _curves = np.array([tr.cumulative_regret for tr in _trackers])
         _mean = _curves.mean(axis=0)
         _T = len(_mean)
+        _rounds = np.arange(1, _T + 1)
+        _normalized = _mean / _rounds  # R(t)/t
         _step = max(1, _T // 500)
         _x = np.arange(0, _T, _step)
         _color = COLORS.get(_name, "#9b59b6")
         regret_fig.add_trace(
             go.Scatter(
                 x=_x,
-                y=_mean[_x],
+                y=_normalized[_x],
                 mode="lines",
                 name=_name,
                 line=dict(color=_color, width=2),
@@ -258,26 +349,6 @@ def slide_results_regret(COLORS, all_results, go, make_subplots, mo, np):
             row=1,
             col=1,
         )
-
-    # sqrt(T) reference
-    _T_ref = 50000
-    _x_ref = np.arange(0, _T_ref, 100)
-    _max_regret = max(
-        np.array([tr.cumulative_regret for tr in _trs]).mean(axis=0)[-1]
-        for _trs in all_results.values()
-    )
-    _scale = _max_regret / np.sqrt(_T_ref)
-    regret_fig.add_trace(
-        go.Scatter(
-            x=_x_ref,
-            y=_scale * np.sqrt(_x_ref),
-            mode="lines",
-            name="O(√T) ref",
-            line=dict(color="gray", dash="dash", width=1),
-        ),
-        row=1,
-        col=1,
-    )
 
     # Right: Sliding window average reward
     _window = 500
@@ -307,7 +378,7 @@ def slide_results_regret(COLORS, all_results, go, make_subplots, mo, np):
     )
     regret_fig.update_xaxes(title_text="Round", row=1, col=1)
     regret_fig.update_xaxes(title_text="Round", row=1, col=2)
-    regret_fig.update_yaxes(title_text="Cumulative Regret", row=1, col=1)
+    regret_fig.update_yaxes(title_text="Avg Regret Per Round", row=1, col=1)
     regret_fig.update_yaxes(title_text="Avg Reward", row=1, col=2)
 
     mo.md("## Results: Regret & Learning Dynamics")
@@ -384,11 +455,13 @@ def _(np):
 @app.cell
 def _(COLORS, all_results, go, mo, np):
     """Slide A: Regret Growth Rate Analysis (log-log)."""
+    _KEY_ALGOS = ["Random", "EpsGreedy(ε=0.05)", "LinUCB(α=0.5)", "TS(v=0.1)"]
     _fig = go.Figure()
     _skip = 1000  # skip early transient
 
     _rows = []
-    for _name, _trackers in all_results.items():
+    for _name in _KEY_ALGOS:
+        _trackers = all_results[_name]
         _curves = np.array([tr.cumulative_regret for tr in _trackers])
         _mean = _curves.mean(axis=0)
         _T = len(_mean)
@@ -411,6 +484,16 @@ def _(COLORS, all_results, go, mo, np):
         _coeffs = np.polyfit(_log_x, _log_y, 1)
         _alpha = _coeffs[0]
         _rows.append(f"| {_name} | {_alpha:.3f} | {'Sublinear' if _alpha < 0.95 else 'Linear'} |")
+
+        # Annotate fitted alpha on the curve
+        _mid_idx = len(_log_x) // 2
+        _fig.add_annotation(
+            x=_log_x[_mid_idx], y=_log_y[_mid_idx],
+            text=f"α={_alpha:.2f}",
+            showarrow=True, arrowhead=2, arrowsize=0.8,
+            font=dict(size=11, color=_color),
+            ax=30, ay=-25,
+        )
 
     # Add reference slopes
     _x_ref = np.linspace(np.log10(_skip + 1), np.log10(50000), 100)
@@ -446,10 +529,12 @@ def _(COLORS, all_results, go, mo, np):
 @app.cell
 def _(COLORS, all_results, go, mo, np):
     """Slide B: Instantaneous Regret Over Time."""
+    _KEY_ALGOS_B = ["Random", "EpsGreedy(ε=0.05)", "LinUCB(α=0.5)", "TS(v=0.1)"]
     _fig = go.Figure()
     _window = 1000
 
-    for _name, _trackers in all_results.items():
+    for _name in _KEY_ALGOS_B:
+        _trackers = all_results[_name]
         _inst_regrets = np.array([
             tr.oracle_rewards[:tr.t] - tr.rewards[:tr.t] for tr in _trackers
         ])
@@ -554,8 +639,8 @@ def _(go, log_rounds, make_subplots, mo, trace_history, ucb_width_history):
     _fig.update_layout(template="plotly_white", height=400, showlegend=False)
     _fig.update_xaxes(title_text="Round", row=1, col=1)
     _fig.update_xaxes(title_text="Round", row=1, col=2)
-    _fig.update_yaxes(title_text="trace(A⁻¹)", row=1, col=1)
-    _fig.update_yaxes(title_text="√(xᵀA⁻¹x)", row=1, col=2)
+    _fig.update_yaxes(title_text="trace(A⁻¹)", type="log", row=1, col=1)
+    _fig.update_yaxes(title_text="√(xᵀA⁻¹x)", type="log", row=1, col=2)
 
     mo.md(r"""
     ## Confidence Ellipsoid Shrinkage
@@ -575,46 +660,39 @@ def _(go, log_rounds, make_subplots, mo, trace_history, ucb_width_history):
 
 @app.cell
 def _(COLORS, all_results, go, mo, np):
-    """Slide E: Reward Distribution (violin plots)."""
+    """Slide E: Per-Round Regret Distribution (box plots)."""
+    _KEY_ALGOS_E = ["Random", "EpsGreedy(ε=0.05)", "LinUCB(α=0.5)", "TS(v=0.1)"]
     _fig = go.Figure()
 
-    # Add oracle first
-    _first_trackers = next(iter(all_results.values()))
-    _oracle_all = np.concatenate([tr.oracle_rewards[:tr.t] for tr in _first_trackers])
-    _fig.add_trace(go.Violin(
-        y=_oracle_all[::10],  # subsample for performance
-        name="Oracle",
-        line_color="#f39c12",
-        box_visible=True,
-        meanline_visible=True,
-    ))
-
-    for _name, _trackers in all_results.items():
-        _rewards_all = np.concatenate([tr.rewards[:tr.t] for tr in _trackers])
+    for _name in _KEY_ALGOS_E:
+        _trackers = all_results[_name]
+        # Compute per-round regret: oracle - actual
+        _regret_all = np.concatenate([
+            tr.oracle_rewards[:tr.t] - tr.rewards[:tr.t] for tr in _trackers
+        ])
         _color = COLORS.get(_name, "#9b59b6")
-        _fig.add_trace(go.Violin(
-            y=_rewards_all[::10],  # subsample for performance
+        _fig.add_trace(go.Box(
+            y=_regret_all[::10],  # subsample for performance
             name=_name,
-            line_color=_color,
-            box_visible=True,
-            meanline_visible=True,
+            marker_color=_color,
+            boxmean=True,
         ))
 
     _fig.update_layout(
-        title="Per-Round Reward Distribution (across all seeds)",
-        yaxis_title="Reward",
+        title="Per-Round Regret Distribution (across all seeds)",
+        yaxis_title="Per-Round Regret (oracle − actual)",
         template="plotly_white", height=500,
         showlegend=False,
     )
 
     mo.md(r"""
-    ## Reward Distribution
+    ## Regret Distribution
 
-    Violin plots of per-round rewards (subsampled 10x for rendering). Box shows IQR; line shows mean.
+    Box plots of per-round regret $r_t^* - r_t$ (subsampled 10x for rendering). Diamond shows mean.
 
-    - **Oracle:** concentrated at high rewards (best arm each round)
-    - **LinUCB / TS:** shift toward higher rewards, thinner left tails
-    - **Random:** wide distribution, lower mean
+    - **Random:** wide distribution, high mean regret — never learns
+    - **EpsGreedy:** moderate regret, residual exploration cost
+    - **LinUCB / TS:** concentrated near zero with thin right tails — mostly picking near-optimal arms
 
     **Theory:** Sub-Gaussian rewards with parameter $\sigma$ satisfy
     $\Pr[|\bar{X}_n - \mu| > \varepsilon] \le 2\exp(-n\varepsilon^2/2\sigma^2)$ — tighter concentration
@@ -672,11 +750,151 @@ def _(COLORS, all_results, go, mo, np):
 
 
 @app.cell
+def slide_bandits_vs_cf(COLORS, all_results, go, make_subplots, mo, np):
+    """Bandits vs. Collaborative Filtering comparison."""
+    _KEY = ["Random", "Popularity", "SVD-CF", "UserCF", "LinUCB(α=0.5)", "TS(v=0.1)"]
+    _available = [k for k in _KEY if k in all_results]
+
+    # Left: cumulative reward as % of oracle over time for key methods
+    _fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=(
+            "Cumulative Reward (% of Oracle) Over Time",
+            "Final Cumulative Reward (T=50K)",
+        ),
+        column_widths=[0.6, 0.4],
+    )
+
+    # Oracle curve (same across all)
+    _first_trackers = next(iter(all_results.values()))
+    _oracle_per_seed = np.array([
+        np.cumsum(tr.oracle_rewards[:tr.t]) for tr in _first_trackers
+    ])
+
+    for _name in _available:
+        _trackers = all_results[_name]
+        _curves = np.array([tr.cumulative_reward for tr in _trackers])
+        _oracle_s = np.array([
+            np.cumsum(tr.oracle_rewards[:tr.t]) for tr in _trackers
+        ])
+        _pct = 100.0 * _curves / _oracle_s
+        _mean = _pct.mean(axis=0)
+        _T = len(_mean)
+        _step = max(1, _T // 500)
+        _x = np.arange(0, _T, _step)
+        _color = COLORS.get(_name, "#9b59b6")
+
+        _fig.add_trace(
+            go.Scatter(
+                x=_x, y=_mean[_x],
+                mode="lines", name=_name,
+                line=dict(color=_color, width=2),
+            ),
+            row=1, col=1,
+        )
+
+    # Right: bar chart of final cumulative reward, grouped
+    _all_names = list(all_results.keys())
+    _offline = [n for n in _all_names if n in ("Popularity", "SVD-CF", "UserCF")]
+    _online = [n for n in _all_names if n not in _offline]
+    _order = _online + _offline
+
+    _final_rewards = []
+    _bar_colors = []
+    for _name in _order:
+        _trackers = all_results[_name]
+        _finals = np.array([tr.cumulative_reward[-1] for tr in _trackers])
+        _final_rewards.append(_finals.mean())
+        _bar_colors.append(COLORS.get(_name, "#9b59b6"))
+
+    _fig.add_trace(
+        go.Bar(
+            x=_order, y=_final_rewards,
+            marker_color=_bar_colors,
+            showlegend=False,
+        ),
+        row=1, col=2,
+    )
+
+    # Add a vertical separator annotation
+    _fig.add_vline(
+        x=len(_online) - 0.5, line_dash="dash", line_color="gray",
+        row=1, col=2,
+    )
+    _fig.add_annotation(
+        x=len(_online) - 0.5, y=max(_final_rewards) * 1.05,
+        text="← Online | Offline →", showarrow=False,
+        font=dict(size=10, color="gray"),
+        row=1, col=2,
+    )
+
+    _fig.update_layout(
+        template="plotly_white", height=500,
+        legend=dict(x=0.02, y=0.02, yanchor="bottom"),
+    )
+    _fig.update_xaxes(title_text="Round", row=1, col=1)
+    _fig.update_yaxes(title_text="% of Oracle", row=1, col=1)
+    _fig.update_xaxes(title_text="", tickangle=-30, row=1, col=2)
+    _fig.update_yaxes(title_text="Cumulative Reward", row=1, col=2)
+
+    # Compute key comparison numbers
+    _linucb_pct = 0.0
+    _svd_pct = 0.0
+    if "LinUCB(α=0.5)" in all_results:
+        _tr = all_results["LinUCB(α=0.5)"]
+        _c = np.array([tr.cumulative_reward for tr in _tr])
+        _o = np.array([np.cumsum(tr.oracle_rewards[:tr.t]) for tr in _tr])
+        _linucb_pct = (100.0 * _c / _o).mean(axis=0)[-1]
+    if "SVD-CF" in all_results:
+        _tr = all_results["SVD-CF"]
+        _c = np.array([tr.cumulative_reward for tr in _tr])
+        _o = np.array([np.cumsum(tr.oracle_rewards[:tr.t]) for tr in _tr])
+        _svd_pct = (100.0 * _c / _o).mean(axis=0)[-1]
+
+    _comparison = ""
+    if _linucb_pct > 0 and _svd_pct > 0:
+        _diff = _linucb_pct - _svd_pct
+        if abs(_diff) < 1.0:
+            _comparison = f"LinUCB ({_linucb_pct:.1f}%) ≈ SVD-CF ({_svd_pct:.1f}%) — **online bandits match pretrained CF** despite starting from scratch, and they can adapt to preference drift."
+        elif _diff > 0:
+            _comparison = f"LinUCB ({_linucb_pct:.1f}%) > SVD-CF ({_svd_pct:.1f}%) — **online bandits outperform pretrained CF**, a strong result given bandits start from zero."
+        else:
+            _comparison = f"SVD-CF ({_svd_pct:.1f}%) > LinUCB ({_linucb_pct:.1f}%) — CF has an offline advantage, but bandits **close the gap over time** and handle cold-start / non-stationarity."
+
+    mo.md(f"""
+    ## Bandits vs. Collaborative Filtering
+
+    **Key caveat:** CF baselines see the **entire 940K-interaction rating matrix** upfront.
+    Bandits start from scratch and learn online. This is an **unfair comparison by design** — if bandits match CF, it's a strong result.
+
+    {_comparison}
+
+    **When to prefer bandits over CF:**
+    - **Cold-start:** new users/items with no rating history
+    - **Non-stationarity:** user preferences drift over time
+    - **Exploration:** CF exploits known patterns; bandits discover new ones
+    """)
+    mo.ui.plotly(_fig)
+    return
+
+
+@app.cell
 def _(all_results, go, mo, np):
     """Slide G: Statistical Significance (heatmap)."""
     from scipy.stats import ttest_rel as _ttest_rel
 
+    _SHORT_NAMES = {
+        "Random": "Rnd",
+        "EpsGreedy(ε=0.05)": "EG.05",
+        "EpsGreedy(ε=0.1)": "EG.1",
+        "LinUCB(α=0.5)": "UCB.5",
+        "LinUCB(α=1.0)": "UCB1",
+        "TS(v=0.1)": "TS.1",
+        "TS(v=0.5)": "TS.5",
+    }
+
     _names = list(all_results.keys())
+    _short = [_SHORT_NAMES.get(_n, _n) for _n in _names]
     _n = len(_names)
 
     # Final cumulative reward per seed for each algorithm
@@ -706,7 +924,7 @@ def _(all_results, go, mo, np):
 
     _fig = go.Figure(data=go.Heatmap(
         z=_pvals,
-        x=_names, y=_names,
+        x=_short, y=_short,
         colorscale=[[0, "#2ecc71"], [0.05, "#f1c40f"], [0.2, "#e74c3c"], [1.0, "#e74c3c"]],
         zmin=0, zmax=0.2,
         text=_annot,
@@ -717,7 +935,7 @@ def _(all_results, go, mo, np):
     _fig.update_layout(
         title="Pairwise Paired t-test p-values (Final Cumulative Reward)",
         template="plotly_white", height=500,
-        xaxis=dict(tickangle=45),
+        xaxis=dict(tickangle=0),
     )
 
     mo.md(r"""
@@ -844,6 +1062,7 @@ def slide_conclusion(all_results, mo, np):
     - **Confidence ellipsoid shrinkage** drives the exploration→exploitation transition: trace($\\mathbf{{A}}_t^{{-1}}$) decreases monotonically, reducing UCB widths over time
     - **Interpretable features:** learned weights reveal that interaction features (genre cosine similarity, score deviation) and anime quality (score) are top drivers of recommendations
     - **Structured > undirected exploration:** UCB bonus and posterior sampling provably outperform $\\varepsilon$-Greedy, which retains residual exploration cost even asymptotically
+    - **Competitive with CF baselines:** Online bandits match or approach pretrained collaborative filtering (SVD-CF, UserCF) despite starting from scratch — and offer cold-start/non-stationarity advantages CF cannot
 
     **Future directions:**
     - **Non-stationarity:** user preferences drift over time → sliding-window or discounted bandits

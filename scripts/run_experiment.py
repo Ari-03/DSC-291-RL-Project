@@ -16,6 +16,7 @@ from src.feature_engineering import FeatureBuilder
 from src.environment import AnimeRecommendationEnv
 from src.bandits import EpsilonGreedy, LinUCB, ThompsonSampling
 from src.bandits.base import ContextualBandit
+from src.baselines import OfflineBaseline, PopularityBaseline, SVDBaseline, UserCFBaseline
 from src.evaluation import ExperimentTracker, save_results
 
 
@@ -69,6 +70,15 @@ def build_algorithms(d: int, lam: float) -> list[ContextualBandit]:
     ]
 
 
+def build_baselines(rating_map: dict[str, dict[int, int]]) -> list[OfflineBaseline]:
+    """Instantiate offline CF baselines (these see the full rating matrix)."""
+    return [
+        PopularityBaseline(rating_map),
+        SVDBaseline(rating_map),
+        UserCFBaseline(rating_map),
+    ]
+
+
 def main():
     print("=" * 60)
     print("Contextual Bandits for Anime Recommendation")
@@ -106,18 +116,21 @@ def main():
     # Run experiments
     print(f"\n[4/4] Running experiments (T={CONFIG['T']}, {len(CONFIG['seeds'])} seeds)...")
     algorithms = build_algorithms(d, CONFIG["lam"])
-    algo_names = [a.name for a in algorithms]
-    print(f"  Algorithms: {algo_names}")
+    print("  Building offline baselines (may take a minute)...")
+    baselines = build_baselines(data["rating_map"])
+    all_policies: list[ContextualBandit | OfflineBaseline] = algorithms + baselines
+    algo_names = [a.name for a in all_policies]
+    print(f"  Policies: {algo_names}")
 
     # results: algo_name -> list of ExperimentTracker (one per seed)
-    results: dict[str, list[ExperimentTracker]] = {a.name: [] for a in algorithms}
-    algo_idx = {a.name: i for i, a in enumerate(algorithms)}
+    results: dict[str, list[ExperimentTracker]] = {a.name: [] for a in all_policies}
+    algo_idx = {a.name: i for i, a in enumerate(all_policies)}
 
     for seed in CONFIG["seeds"]:
         print(f"\n  Seed {seed}: generating sequence...")
         sequence = env.generate_sequence(CONFIG["T"], seed=seed)
 
-        for algo in algorithms:
+        for algo in all_policies:
             start = time.time()
             # Use per-algorithm RNG with deterministic index (hash() is session-random)
             algo_rng_seed = seed * 1000 + algo_idx[algo.name]
@@ -149,7 +162,7 @@ def main():
 
 
 def _run_with_rng(
-    algo: ContextualBandit,
+    algo: ContextualBandit | OfflineBaseline,
     sequence: list,
     env: AnimeRecommendationEnv,
     T: int,
@@ -159,13 +172,18 @@ def _run_with_rng(
     tracker = ExperimentTracker(algo.name, T)
     algo.reset()
     rng = np.random.RandomState(rng_seed)
+    is_offline = isinstance(algo, OfflineBaseline)
 
     for t in tqdm(range(T), desc=f"    {algo.name:25s}", leave=False, ncols=80):
         username, anime_ids, contexts, oracle = sequence[t]
-        arm_idx = algo.select_arm(contexts, rng)
+        if is_offline:
+            arm_idx = algo.select_arm(username, anime_ids, rng)
+        else:
+            arm_idx = algo.select_arm(contexts, rng)
         chosen_anime = anime_ids[arm_idx]
         reward = env.get_reward(username, chosen_anime)
-        algo.update(contexts[arm_idx], reward)
+        if not is_offline:
+            algo.update(contexts[arm_idx], reward)
         tracker.log(reward, oracle)
 
     return tracker

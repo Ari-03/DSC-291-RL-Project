@@ -54,6 +54,9 @@ COLORS = {
     "EpsGreedy": "#e74c3c",
     "LinUCB": "#2ecc71",
     "TS": "#3498db",
+    "Popularity": "#f39c12",
+    "SVD": "#8e44ad",
+    "UserCF": "#1abc9c",
 }
 
 def _get_color(name: str) -> str:
