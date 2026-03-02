@@ -176,8 +176,8 @@ class FeatureBuilder:
     def build_context(self, username: str, anime_id: int) -> np.ndarray:
         """Build full context vector x_{a,t} = phi(user, anime).
 
-        Layout: [user_feats(4), anime_feats(60), interaction(2), bias(1)]
-        Total: 4 + 60 + 2 + 1 = 67
+        Layout: [user_feats(4), anime_feats(60), interaction(7), bias(1)]
+        Total: 4 + 60 + 7 + 1 = 72
         """
         user_feats = self._user_features[username]
         anime_feats = self._anime_features[anime_id]
@@ -199,7 +199,23 @@ class FeatureBuilder:
         anime_score = self._anime_score[anime_id]
         score_dev = (user_mean - anime_score) / self.anime_score_std
 
-        interaction = np.array([genre_cos, score_dev], dtype=np.float64)
+        # Normalized anime score (reuse from anime_feats computation)
+        norm_score = (anime_score - self.anime_score_mean) / self.anime_score_std
+
+        # Normalized user engagement (log_completed, already in user_feats[1])
+        log_completed = user_feats[1]
+        # Normalized anime popularity (log_pop, already in anime_feats[44])
+        log_pop = anime_feats[44]
+
+        interaction = np.array([
+            genre_cos,                    # original
+            score_dev,                    # original
+            genre_cos ** 2,               # nonlinear genre preference
+            genre_cos * norm_score,       # genre match * anime quality
+            genre_cos * score_dev,        # genre match * user pickiness
+            log_completed * log_pop,      # engaged user * popular anime
+            score_dev ** 2,               # nonlinear deviation effect
+        ], dtype=np.float64)
 
         return np.concatenate([user_feats, anime_feats, interaction, [1.0]])  # bias
 

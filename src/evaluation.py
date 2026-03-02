@@ -52,6 +52,7 @@ def load_results(path: Path) -> dict:
 COLORS = {
     "Random": "#888888",
     "EpsGreedy": "#e74c3c",
+    "DecayEG": "#d35400",
     "LinUCB": "#2ecc71",
     "TS": "#3498db",
     "Popularity": "#f39c12",

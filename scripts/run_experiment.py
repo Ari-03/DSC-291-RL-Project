@@ -14,7 +14,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.data_loader import load_all
 from src.feature_engineering import FeatureBuilder
 from src.environment import AnimeRecommendationEnv
-from src.bandits import EpsilonGreedy, LinUCB, ThompsonSampling
+from src.bandits import EpsilonGreedy, DecayingEpsilonGreedy, LinUCB, ThompsonSampling
 from src.bandits.base import ContextualBandit
 from src.baselines import OfflineBaseline, PopularityBaseline, SVDBaseline, UserCFBaseline
 from src.evaluation import ExperimentTracker, save_results
@@ -23,12 +23,13 @@ from src.evaluation import ExperimentTracker, save_results
 # ---- Configuration ----
 CONFIG = {
     "T": 50_000,           # rounds per experiment
-    "K": 20,               # arms per round
+    "K": 50,               # arms per round
     "seeds": [0, 1, 2, 3, 4],
     "n_users": 5000,
     "min_ratings": 20,
     "min_anime_ratings": 50,
-    "lam": 1.0,
+    "lam": 0.1,
+    "warm_start_n": 5000,  # samples for warm-start ridge regression
     "binary_threshold": 7,
     "reward_type": "continuous",  # "continuous" or "binary"
 }
@@ -63,6 +64,8 @@ def build_algorithms(d: int, lam: float) -> list[ContextualBandit]:
         RandomPolicy(d, lam),
         EpsilonGreedy(d, epsilon=0.05, lam=lam),
         EpsilonGreedy(d, epsilon=0.1, lam=lam),
+        DecayingEpsilonGreedy(d, epsilon_0=1.0, lam=lam),
+        LinUCB(d, alpha=0.1, lam=lam),
         LinUCB(d, alpha=0.5, lam=lam),
         LinUCB(d, alpha=1.0, lam=lam),
         ThompsonSampling(d, v=0.1, lam=lam),
@@ -85,7 +88,7 @@ def main():
     print("=" * 60)
 
     # Load data
-    print("\n[1/4] Loading data...")
+    print("\n[1/5] Loading data...")
     data = load_all(
         n_users=CONFIG["n_users"],
         min_ratings=CONFIG["min_ratings"],
@@ -96,13 +99,13 @@ def main():
     print(f"  Interactions: {len(data['interactions'])}")
 
     # Build features
-    print("\n[2/4] Building feature vectors...")
+    print("\n[2/5] Building feature vectors...")
     fb = FeatureBuilder(data["anime_df"], data["users_df"], data["rating_map"])
     d = fb.dim
     print(f"  Feature dimension: {d}")
 
     # Create environment
-    print("\n[3/4] Setting up environment...")
+    print("\n[3/5] Setting up environment...")
     env = AnimeRecommendationEnv(
         feature_builder=fb,
         rating_map=data["rating_map"],
@@ -113,8 +116,16 @@ def main():
     )
     print(f"  Valid users for K={CONFIG['K']}: {len(env.valid_users)}")
 
+    # Warm-start: fit offline ridge regression on a sample of interactions
+    print("\n[4/5] Computing warm-start from offline data...")
+    warm_theta, warm_A_inv, warm_b = _compute_warm_start(
+        fb, data["rating_map"], CONFIG["lam"], CONFIG["warm_start_n"],
+        reward_type=CONFIG["reward_type"],
+    )
+    print(f"  Warm-start fitted on {CONFIG['warm_start_n']} samples")
+
     # Run experiments
-    print(f"\n[4/4] Running experiments (T={CONFIG['T']}, {len(CONFIG['seeds'])} seeds)...")
+    print(f"\n[5/5] Running experiments (T={CONFIG['T']}, {len(CONFIG['seeds'])} seeds)...")
     algorithms = build_algorithms(d, CONFIG["lam"])
     print("  Building offline baselines (may take a minute)...")
     baselines = build_baselines(data["rating_map"])
@@ -135,7 +146,10 @@ def main():
             # Use per-algorithm RNG with deterministic index (hash() is session-random)
             algo_rng_seed = seed * 1000 + algo_idx[algo.name]
             # Patch the select_arm call to use a proper RNG
-            tracker = _run_with_rng(algo, sequence, env, CONFIG["T"], algo_rng_seed)
+            tracker = _run_with_rng(
+                algo, sequence, env, CONFIG["T"], algo_rng_seed,
+                warm_start=(warm_theta, warm_A_inv, warm_b),
+            )
             elapsed = time.time() - start
             results[algo.name].append(tracker)
             final_reward = tracker.cumulative_reward[-1]
@@ -161,18 +175,65 @@ def main():
         print(f"  {name:25s} | reward={np.mean(rewards):.1f}±{np.std(rewards):.1f} | regret={np.mean(regrets):.1f}±{np.std(regrets):.1f}")
 
 
+def _compute_warm_start(
+    fb: FeatureBuilder,
+    rating_map: dict,
+    lam: float,
+    n_samples: int,
+    reward_type: str = "continuous",
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Fit ridge regression on a sample of (user, anime, rating) triples."""
+    rng = np.random.RandomState(42)
+    d = fb.dim
+
+    # Collect all (user, anime) pairs
+    pairs = []
+    for u, ratings in rating_map.items():
+        for aid, rating in ratings.items():
+            if fb.has_anime(aid) and u in fb._user_features:
+                pairs.append((u, aid, rating))
+
+    # Sample
+    indices = rng.choice(len(pairs), size=min(n_samples, len(pairs)), replace=False)
+
+    X = np.zeros((len(indices), d))
+    y = np.zeros(len(indices))
+    for i, idx in enumerate(indices):
+        u, aid, rating = pairs[idx]
+        X[i] = fb.build_context(u, aid)
+        if reward_type == "binary":
+            y[i] = 1.0 if rating >= 7 else 0.0
+        else:
+            y[i] = rating / 10.0
+
+    # Ridge regression: theta = (X^T X + lam I)^{-1} X^T y
+    A = X.T @ X + lam * np.eye(d)
+    b = X.T @ y
+    A_inv = np.linalg.inv(A)
+    theta = A_inv @ b
+
+    return theta, A_inv, b
+
+
 def _run_with_rng(
     algo: ContextualBandit | OfflineBaseline,
     sequence: list,
     env: AnimeRecommendationEnv,
     T: int,
     rng_seed: int,
+    warm_start: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
 ) -> ExperimentTracker:
     """Run one algorithm with a dedicated RNG."""
     tracker = ExperimentTracker(algo.name, T)
     algo.reset()
-    rng = np.random.RandomState(rng_seed)
     is_offline = isinstance(algo, OfflineBaseline)
+
+    # Apply warm-start to online bandits (except Random)
+    if warm_start is not None and not is_offline and hasattr(algo, 'warm_start') and algo.name != "Random":
+        theta, A_inv, b = warm_start
+        algo.warm_start(theta, A_inv, b)
+
+    rng = np.random.RandomState(rng_seed)
 
     for t in tqdm(range(T), desc=f"    {algo.name:25s}", leave=False, ncols=80):
         username, anime_ids, contexts, oracle = sequence[t]

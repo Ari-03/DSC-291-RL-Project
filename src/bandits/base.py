@@ -45,6 +45,12 @@ class ContextualBandit(ABC):
         # Recompute theta_hat
         self.theta_hat = self.A_inv @ self.b
 
+    def warm_start(self, theta: np.ndarray, A_inv: np.ndarray, b: np.ndarray):
+        """Initialize from offline ridge regression fit."""
+        self.theta_hat = theta.copy()
+        self.A_inv = A_inv.copy()
+        self.b = b.copy()
+
     @property
     def name(self) -> str:
         return self.__class__.__name__
