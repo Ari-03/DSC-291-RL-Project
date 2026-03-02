@@ -154,7 +154,7 @@ def slide_algorithms(mo):
 
 @app.cell
 def slide_setup(mo):
-    mo.md("""
+    mo.md(r"""
     ## Experiment Setup
 
     | Parameter | Value |
@@ -316,6 +316,428 @@ def slide_results_regret(COLORS, all_results, go, make_subplots, mo, np):
 
 
 @app.cell
+def _(np):
+    """Shared computation: train LinUCB and log uncertainty metrics."""
+    from src.data_loader import load_all as _load_all
+    from src.feature_engineering import (
+        FeatureBuilder as _FeatureBuilder,
+        ALL_GENRES as _ALL_GENRES,
+        ALL_TYPES as _ALL_TYPES,
+        ALL_SOURCE_GROUPS as _ALL_SOURCE_GROUPS,
+    )
+    from src.environment import AnimeRecommendationEnv as _Env
+    from src.bandits import LinUCB as _LinUCB
+
+    _data = _load_all()
+    _fb = _FeatureBuilder(_data["anime_df"], _data["users_df"], _data["rating_map"])
+    _env = _Env(_fb, _data["rating_map"], _data["sampled_users"], K=20, reward_type="continuous")
+    _seq = _env.generate_sequence(T=50_000, seed=0)
+
+    _agent = _LinUCB(_fb.dim, alpha=0.5)
+    _rng = np.random.RandomState(0)
+
+    # Sample 100 fixed contexts for tracking UCB width
+    _fixed_contexts = np.array([_seq[i][2][0] for i in range(0, 1000, 10)])  # 100 contexts
+
+    trace_history = []
+    ucb_width_history = []
+    log_rounds = []
+
+    for _t, (_user, _aids, _ctxs, _oracle) in enumerate(_seq):
+        _arm = _agent.select_arm(_ctxs, _rng)
+        _r = _env.get_reward(_user, _aids[_arm])
+        _agent.update(_ctxs[_arm], _r)
+
+        if (_t + 1) % 100 == 0:
+            log_rounds.append(_t + 1)
+            trace_history.append(np.trace(_agent.A_inv))
+            _temp = _fixed_contexts @ _agent.A_inv
+            _widths = np.sqrt(np.sum(_temp * _fixed_contexts, axis=1))
+            ucb_width_history.append(_widths.mean())
+
+    learned_theta = _agent.theta_hat.copy()
+
+    # Build feature names (67 total)
+    feature_names = (
+        ["user: mean_score", "user: log_completed", "user: log_days", "user: log_list_size"]
+        + [f"genre: {g}" for g in _ALL_GENRES]
+        + ["anime: score", "anime: log_pop", "anime: log_episodes"]
+        + [f"type: {t}" for t in _ALL_TYPES]
+        + [f"source: {s}" for s in _ALL_SOURCE_GROUPS]
+        + ["anime: duration", "anime: year"]
+        + ["interaction: genre_cos_sim", "interaction: score_dev"]
+        + ["bias"]
+    )
+
+    trace_history = np.array(trace_history)
+    ucb_width_history = np.array(ucb_width_history)
+    log_rounds = np.array(log_rounds)
+    return (
+        feature_names,
+        learned_theta,
+        log_rounds,
+        trace_history,
+        ucb_width_history,
+    )
+
+
+@app.cell
+def _(COLORS, all_results, go, mo, np):
+    """Slide A: Regret Growth Rate Analysis (log-log)."""
+    _fig = go.Figure()
+    _skip = 1000  # skip early transient
+
+    _rows = []
+    for _name, _trackers in all_results.items():
+        _curves = np.array([tr.cumulative_regret for tr in _trackers])
+        _mean = _curves.mean(axis=0)
+        _T = len(_mean)
+        _x = np.arange(1, _T + 1)
+        _color = COLORS.get(_name, "#9b59b6")
+
+        # Log-log plot
+        _log_x = np.log10(_x[_skip:])
+        _log_y = np.log10(np.maximum(_mean[_skip:], 1e-10))
+        _step = max(1, len(_log_x) // 500)
+        _fig.add_trace(
+            go.Scatter(
+                x=_log_x[::_step], y=_log_y[::_step],
+                mode="lines", name=_name,
+                line=dict(color=_color, width=2),
+            )
+        )
+
+        # Fit power law: log R = alpha * log t + log c
+        _coeffs = np.polyfit(_log_x, _log_y, 1)
+        _alpha = _coeffs[0]
+        _rows.append(f"| {_name} | {_alpha:.3f} | {'Sublinear' if _alpha < 0.95 else 'Linear'} |")
+
+    # Add reference slopes
+    _x_ref = np.linspace(np.log10(_skip + 1), np.log10(50000), 100)
+    _fig.add_trace(go.Scatter(x=_x_ref, y=0.5 * _x_ref + 1.0, mode="lines",
+                              name="slope=0.5 (√T)", line=dict(color="gray", dash="dash", width=1)))
+    _fig.add_trace(go.Scatter(x=_x_ref, y=1.0 * _x_ref - 0.5, mode="lines",
+                              name="slope=1.0 (linear)", line=dict(color="gray", dash="dot", width=1)))
+
+    _fig.update_layout(
+        title="Cumulative Regret: Log-Log Scale",
+        xaxis_title="log₁₀(Round)", yaxis_title="log₁₀(Cumulative Regret)",
+        template="plotly_white", height=400,
+        legend=dict(x=0.02, y=0.98),
+    )
+    _table = "\n".join(_rows)
+
+    mo.md(f"""
+    ## Regret Growth Rate Analysis
+
+    Fit $R(t) = c \\cdot t^\\alpha$ on log-log scale (skipping first 1,000 rounds):
+
+    | Algorithm | Fitted α | Interpretation |
+    |-----------|:---:|----------------|
+    {_table}
+
+    **Theory:** LinUCB regret bound is $R(T) = O(d\\sqrt{{T}} \\log T)$, so $\\alpha \\approx 0.5$.
+    Random policy has $\\alpha \\approx 1$ (linear regret).
+    """)
+    mo.ui.plotly(_fig)
+    return
+
+
+@app.cell
+def _(COLORS, all_results, go, mo, np):
+    """Slide B: Instantaneous Regret Over Time."""
+    _fig = go.Figure()
+    _window = 1000
+
+    for _name, _trackers in all_results.items():
+        _inst_regrets = np.array([
+            tr.oracle_rewards[:tr.t] - tr.rewards[:tr.t] for tr in _trackers
+        ])
+        _mean_inst = _inst_regrets.mean(axis=0)
+        _kernel = np.ones(_window) / _window
+        _smoothed = np.convolve(_mean_inst, _kernel, mode="valid")
+        _x = np.arange(len(_smoothed))
+        _step = max(1, len(_x) // 500)
+        _color = COLORS.get(_name, "#9b59b6")
+
+        _fig.add_trace(
+            go.Scatter(
+                x=_x[::_step], y=_smoothed[::_step],
+                mode="lines", name=_name,
+                line=dict(color=_color, width=2),
+            )
+        )
+
+    _fig.update_layout(
+        title="Instantaneous Regret (Smoothed, window=1000)",
+        xaxis_title="Round", yaxis_title="Per-Round Regret",
+        template="plotly_white", height=450,
+        legend=dict(x=0.75, y=0.98),
+    )
+
+    mo.md(r"""
+    ## Instantaneous Regret Over Time
+
+    Per-round regret $r_t^* - r_t$ smoothed with a 1,000-round moving average.
+
+    - **Random:** flat — no learning, constant expected regret
+    - **LinUCB / TS:** decreasing — converging to optimal policy
+    - **ε-Greedy:** plateaus above zero — residual $\varepsilon$-exploration cost
+
+    **Theory:** For sublinear cumulative regret $R(T) = o(T)$, we need instantaneous regret $\to 0$.
+    This connects to the Azuma-Hoeffding martingale concentration analysis of the regret process.
+    """)
+    mo.ui.plotly(_fig)
+    return
+
+
+@app.cell
+def _(feature_names, go, learned_theta, mo, np):
+    """Slide C: Learned Feature Weights (theta_hat)."""
+    _theta = learned_theta
+    _names = feature_names
+
+    # Sort by weight
+    _sorted_idx = np.argsort(_theta)
+    _top15 = _sorted_idx[-15:][::-1]  # highest 15
+    _bot5 = _sorted_idx[:5]            # lowest 5
+    _show_idx = np.concatenate([_top15, _bot5])
+
+    _fig = go.Figure()
+    _colors = ["#2ecc71" if _theta[i] >= 0 else "#e74c3c" for i in _show_idx]
+
+    _fig.add_trace(go.Bar(
+        y=[_names[i] for i in _show_idx],
+        x=[_theta[i] for i in _show_idx],
+        orientation="h",
+        marker_color=_colors,
+    ))
+    _fig.update_layout(
+        title="LinUCB(α=0.5): Learned Feature Weights θ̂ (50K rounds)",
+        xaxis_title="Weight", yaxis_title="",
+        template="plotly_white", height=550,
+        yaxis=dict(autorange="reversed"),
+        margin=dict(l=200),
+    )
+
+    mo.md(r"""
+    ## Learned Feature Weights ($\hat{\boldsymbol{\theta}}$)
+
+    Top-15 positive and bottom-5 negative weights from LinUCB after 50,000 rounds.
+
+    **Theory:** $\hat{\boldsymbol{\theta}}_T = \mathbf{A}_T^{-1}\mathbf{b}_T$ is the online ridge regression
+    solution, converging to $\boldsymbol{\theta}^*$ at rate $O(1/\sqrt{T})$ (lecture 2).
+    """)
+    mo.ui.plotly(_fig)
+    return
+
+
+@app.cell
+def _(go, log_rounds, make_subplots, mo, trace_history, ucb_width_history):
+    """Slide D: Confidence Ellipsoid Shrinkage."""
+    _fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=("trace(A⁻¹) Over Time", "Avg UCB Width Over Time"),
+    )
+
+    _fig.add_trace(
+        go.Scatter(x=log_rounds, y=trace_history, mode="lines",
+                   line=dict(color="#2ecc71", width=2), name="trace(A⁻¹)"),
+        row=1, col=1,
+    )
+    _fig.add_trace(
+        go.Scatter(x=log_rounds, y=ucb_width_history, mode="lines",
+                   line=dict(color="#3498db", width=2), name="Avg UCB width"),
+        row=1, col=2,
+    )
+
+    _fig.update_layout(template="plotly_white", height=400, showlegend=False)
+    _fig.update_xaxes(title_text="Round", row=1, col=1)
+    _fig.update_xaxes(title_text="Round", row=1, col=2)
+    _fig.update_yaxes(title_text="trace(A⁻¹)", row=1, col=1)
+    _fig.update_yaxes(title_text="√(xᵀA⁻¹x)", row=1, col=2)
+
+    mo.md(r"""
+    ## Confidence Ellipsoid Shrinkage
+
+    As data accumulates, $\mathbf{A}_t = \lambda\mathbf{I} + \sum_{s=1}^{t}\mathbf{x}_s\mathbf{x}_s^\top$ grows,
+    so $\mathbf{A}_t^{-1}$ shrinks. This drives LinUCB from **exploration → exploitation**.
+
+    - **Left:** $\text{trace}(\mathbf{A}_t^{-1})$ — overall uncertainty scale (sum of eigenvalues of $\mathbf{A}_t^{-1}$)
+    - **Right:** $\sqrt{\mathbf{x}^\top \mathbf{A}_t^{-1} \mathbf{x}}$ — the UCB bonus term, averaged over 100 fixed contexts
+
+    **Theory:** The confidence set $\mathcal{C}_t = \{\boldsymbol{\theta}: \|\boldsymbol{\theta} - \hat{\boldsymbol{\theta}}_t\|_{\mathbf{A}_t} \le \beta_t\}$
+    contracts as $\mathbf{A}_t$ grows. LinUCB's regret bound follows from this contraction (lecture 2/3).
+    """)
+    mo.ui.plotly(_fig)
+    return
+
+
+@app.cell
+def _(COLORS, all_results, go, mo, np):
+    """Slide E: Reward Distribution (violin plots)."""
+    _fig = go.Figure()
+
+    # Add oracle first
+    _first_trackers = next(iter(all_results.values()))
+    _oracle_all = np.concatenate([tr.oracle_rewards[:tr.t] for tr in _first_trackers])
+    _fig.add_trace(go.Violin(
+        y=_oracle_all[::10],  # subsample for performance
+        name="Oracle",
+        line_color="#f39c12",
+        box_visible=True,
+        meanline_visible=True,
+    ))
+
+    for _name, _trackers in all_results.items():
+        _rewards_all = np.concatenate([tr.rewards[:tr.t] for tr in _trackers])
+        _color = COLORS.get(_name, "#9b59b6")
+        _fig.add_trace(go.Violin(
+            y=_rewards_all[::10],  # subsample for performance
+            name=_name,
+            line_color=_color,
+            box_visible=True,
+            meanline_visible=True,
+        ))
+
+    _fig.update_layout(
+        title="Per-Round Reward Distribution (across all seeds)",
+        yaxis_title="Reward",
+        template="plotly_white", height=500,
+        showlegend=False,
+    )
+
+    mo.md(r"""
+    ## Reward Distribution
+
+    Violin plots of per-round rewards (subsampled 10x for rendering). Box shows IQR; line shows mean.
+
+    - **Oracle:** concentrated at high rewards (best arm each round)
+    - **LinUCB / TS:** shift toward higher rewards, thinner left tails
+    - **Random:** wide distribution, lower mean
+
+    **Theory:** Sub-Gaussian rewards with parameter $\sigma$ satisfy
+    $\Pr[|\bar{X}_n - \mu| > \varepsilon] \le 2\exp(-n\varepsilon^2/2\sigma^2)$ — tighter concentration
+    as algorithms learn to select better arms (lecture 1).
+    """)
+    mo.ui.plotly(_fig)
+    return
+
+
+@app.cell
+def _(COLORS, all_results, go, mo, np):
+    """Slide F: Hyperparameter Sensitivity (bar chart)."""
+    _names = list(all_results.keys())
+    _final_regrets_mean = []
+    _final_regrets_se = []
+    _colors = []
+
+    for _name in _names:
+        _trackers = all_results[_name]
+        _finals = np.array([tr.cumulative_regret[-1] for tr in _trackers])
+        _final_regrets_mean.append(_finals.mean())
+        _final_regrets_se.append(_finals.std() / np.sqrt(len(_finals)))
+        _colors.append(COLORS.get(_name, "#9b59b6"))
+
+    _fig = go.Figure()
+    _fig.add_trace(go.Bar(
+        x=_names,
+        y=_final_regrets_mean,
+        error_y=dict(type="data", array=_final_regrets_se, visible=True),
+        marker_color=_colors,
+    ))
+
+    _fig.update_layout(
+        title="Final Cumulative Regret (T=50,000) — Mean ± SE over 5 seeds",
+        xaxis_title="Algorithm", yaxis_title="Cumulative Regret",
+        template="plotly_white", height=450,
+    )
+
+    mo.md(r"""
+    ## Hyperparameter Sensitivity
+
+    Final cumulative regret at $T = 50{,}000$ for all algorithm variants. Error bars show ± 1 SE (5 seeds).
+
+    - **Within families**, lower exploration parameters perform better on this dataset:
+      - LinUCB: $\alpha=0.5$ < $\alpha=1.0$
+      - TS: $v=0.1$ < $v=0.5$
+      - ε-Greedy: $\varepsilon=0.05$ < $\varepsilon=0.1$
+    - **Across families:** LinUCB ≈ TS ≪ ε-Greedy ≪ Random
+
+    **Theory:** The regret bound for LinUCB scales linearly with $\alpha$: $R(T) = O(\alpha d \sqrt{T})$.
+    Thompson Sampling's Bayes regret scales with $v$ similarly.
+    """)
+    mo.ui.plotly(_fig)
+    return
+
+
+@app.cell
+def _(all_results, go, mo, np):
+    """Slide G: Statistical Significance (heatmap)."""
+    from scipy.stats import ttest_rel as _ttest_rel
+
+    _names = list(all_results.keys())
+    _n = len(_names)
+
+    # Final cumulative reward per seed for each algorithm
+    _final_rewards = {}
+    for _name, _trackers in all_results.items():
+        _final_rewards[_name] = np.array([tr.cumulative_reward[-1] for tr in _trackers])
+
+    _pvals = np.ones((_n, _n))
+    for _i in range(_n):
+        for _j in range(_n):
+            if _i != _j:
+                _, _p = _ttest_rel(_final_rewards[_names[_i]], _final_rewards[_names[_j]])
+                _pvals[_i, _j] = _p
+
+    # Format annotations
+    _annot = []
+    for _i in range(_n):
+        _row = []
+        for _j in range(_n):
+            if _i == _j:
+                _row.append("—")
+            elif _pvals[_i, _j] < 0.001:
+                _row.append(f"{_pvals[_i, _j]:.1e}")
+            else:
+                _row.append(f"{_pvals[_i, _j]:.3f}")
+        _annot.append(_row)
+
+    _fig = go.Figure(data=go.Heatmap(
+        z=_pvals,
+        x=_names, y=_names,
+        colorscale=[[0, "#2ecc71"], [0.05, "#f1c40f"], [0.2, "#e74c3c"], [1.0, "#e74c3c"]],
+        zmin=0, zmax=0.2,
+        text=_annot,
+        texttemplate="%{text}",
+        colorbar=dict(title="p-value"),
+    ))
+
+    _fig.update_layout(
+        title="Pairwise Paired t-test p-values (Final Cumulative Reward)",
+        template="plotly_white", height=500,
+        xaxis=dict(tickangle=45),
+    )
+
+    mo.md(r"""
+    ## Statistical Significance
+
+    Paired t-test on final cumulative reward across 5 seeds (same random sequences → natural pairing).
+
+    - **Green cells** ($p < 0.05$): statistically significant difference
+    - **Red/yellow cells** ($p > 0.05$): not enough evidence to distinguish
+
+    With only 5 seeds, we have limited statistical power. Differences between similar algorithms
+    (e.g., LinUCB vs TS) may not be significant, while Random vs. others clearly is.
+
+    **Design choice:** Paired tests control for sequence randomness, increasing power vs. unpaired tests.
+    """)
+    mo.ui.plotly(_fig)
+    return
+
+
+@app.cell
 def slide_examples(mo, np):
     from src.data_loader import load_all as _load_all
     from src.feature_engineering import FeatureBuilder as _FeatureBuilder
@@ -418,9 +840,10 @@ def slide_conclusion(all_results, mo, np):
     {_table}
 
     **Key takeaways:**
-    - LinUCB and Thompson Sampling consistently outperform ε-Greedy and Random
-    - Structured exploration (UCB bonus / posterior sampling) > undirected exploration (ε-Greedy)
-    - Regret grows sublinearly — the algorithms are learning effectively
+    - **Sublinear regret confirmed:** Fitted growth rates show LinUCB/TS achieve $\\alpha \\approx 0.5$–$0.7$ (sublinear), while Random has $\\alpha \\approx 1$ (linear) — matching the theoretical $O(d\\sqrt{{T}})$ bound
+    - **Confidence ellipsoid shrinkage** drives the exploration→exploitation transition: trace($\\mathbf{{A}}_t^{{-1}}$) decreases monotonically, reducing UCB widths over time
+    - **Interpretable features:** learned weights reveal that interaction features (genre cosine similarity, score deviation) and anime quality (score) are top drivers of recommendations
+    - **Structured > undirected exploration:** UCB bonus and posterior sampling provably outperform $\\varepsilon$-Greedy, which retains residual exploration cost even asymptotically
 
     **Future directions:**
     - **Non-stationarity:** user preferences drift over time → sliding-window or discounted bandits
