@@ -55,7 +55,6 @@ COLORS = {
     "DecayEG": "#d35400",
     "LinUCB": "#2ecc71",
     "TS": "#3498db",
-    "Popularity": "#f39c12",
     "SVD": "#8e44ad",
     "UserCF": "#1abc9c",
 }

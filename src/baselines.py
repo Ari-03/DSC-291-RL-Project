@@ -1,4 +1,4 @@
-"""Offline baselines for comparison: Popularity, SVD-CF, UserCF.
+"""Offline baselines for comparison: SVD-CF, UserCF.
 
 These baselines are trained on the training split (70% of each user's
 ratings) and evaluated on the held-out test split. This is a fair
@@ -28,28 +28,6 @@ class OfflineBaseline(ABC):
     @property
     @abstractmethod
     def name(self) -> str: ...
-
-
-class PopularityBaseline(OfflineBaseline):
-    """Recommend the anime with the highest global average rating."""
-
-    def __init__(self, rating_map: dict[str, dict[int, int]]):
-        # Compute average rating per anime across all users
-        totals: dict[int, list[int]] = {}
-        for user_ratings in rating_map.values():
-            for aid, rating in user_ratings.items():
-                if aid not in totals:
-                    totals[aid] = []
-                totals[aid].append(rating)
-        self.avg_rating = {aid: np.mean(ratings) for aid, ratings in totals.items()}
-
-    def select_arm(self, username: str, anime_ids: list[int], rng: np.random.RandomState) -> int:
-        scores = [self.avg_rating.get(aid, 0.0) for aid in anime_ids]
-        return int(np.argmax(scores))
-
-    @property
-    def name(self) -> str:
-        return "Popularity"
 
 
 class SVDBaseline(OfflineBaseline):

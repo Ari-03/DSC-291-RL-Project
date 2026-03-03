@@ -34,7 +34,6 @@ def imports():
         "LinUCB(α=1.0)": "#27ae60",
         "TS(v=0.1)": "#3498db",
         "TS(v=0.5)": "#2980b9",
-        "Popularity": "#f39c12",
         "SVD-CF": "#8e44ad",
         "UserCF": "#16a085",
     }
@@ -185,7 +184,7 @@ def slide_setup(mo):
     | Decaying ε-Greedy | ε₀ = 1.0, ε_t = ε₀/√t |
     | LinUCB | α ∈ {0.1, 0.5, 1.0} |
     | Thompson Sampling | v ∈ {0.1, 0.5} |
-    | **Offline CF baselines** | Popularity, SVD, UserCF |
+    | **Offline CF baselines** | SVD, UserCF |
 
     **Fair comparison:** All algorithms see the **same user/candidate sequence** per seed. CF baselines are trained on 70% of ratings; rewards come from the held-out 30%.
     """)
@@ -766,7 +765,7 @@ def _(COLORS, all_results, go, mo, np):
 @app.cell
 def slide_bandits_vs_cf(COLORS, all_results, go, make_subplots, mo, np):
     """Bandits vs. Collaborative Filtering comparison."""
-    _KEY = ["Random", "Popularity", "SVD-CF", "UserCF", "LinUCB(α=0.5)", "TS(v=0.1)"]
+    _KEY = ["Random", "SVD-CF", "UserCF", "LinUCB(α=0.5)", "TS(v=0.1)"]
     _available = [k for k in _KEY if k in all_results]
 
     # Left: cumulative reward as % of oracle over time for key methods
@@ -809,7 +808,7 @@ def slide_bandits_vs_cf(COLORS, all_results, go, make_subplots, mo, np):
 
     # Right: bar chart of final cumulative reward, grouped
     _all_names = list(all_results.keys())
-    _offline = [n for n in _all_names if n in ("Popularity", "SVD-CF", "UserCF")]
+    _offline = [n for n in _all_names if n in ("SVD-CF", "UserCF")]
     _online = [n for n in _all_names if n not in _offline]
     _order = _online + _offline
 
@@ -907,7 +906,6 @@ def _(all_results, go, mo, np):
         "LinUCB(α=1.0)": "UCB1",
         "TS(v=0.1)": "TS.1",
         "TS(v=0.5)": "TS.5",
-        "Popularity": "Pop",
         "SVD-CF": "SVD",
         "UserCF": "UCF",
     }

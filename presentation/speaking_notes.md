@@ -62,11 +62,11 @@
 
 ## Slide 16: Bandits vs. Collaborative Filtering
 
-"Now the key comparison: online bandits vs. offline CF baselines with a fair train/test split. We have three CF methods — Popularity (global average rating), SVD-CF (matrix factorization with 100 latent factors), and UserCF (user-based cosine similarity with 50 nearest neighbors). CF baselines are trained on 70% of each user's ratings, and rewards come from the held-out 30%. This is critical — in the previous version, CF trained and tested on the same data, inflating its numbers. With a fair split, CF must generalize. Our bandits learn online with user-centered rewards and a warm-start from 10K training samples. On the left, cumulative reward as a percentage of oracle over time. On the right, final rewards with a vertical line separating online and offline methods. Bandits also offer real advantages beyond raw numbers: cold-start handling, adaptation to preference drift, and continuous exploration."
+"Now the key comparison: online bandits vs. offline CF baselines with a fair train/test split. We have two CF methods — SVD-CF (matrix factorization with 100 latent factors) and UserCF (user-based cosine similarity with 50 nearest neighbors). CF baselines are trained on 70% of each user's ratings, and rewards come from the held-out 30%. This is critical — in the previous version, CF trained and tested on the same data, inflating its numbers. With a fair split, CF must generalize. Our bandits learn online with user-centered rewards and a warm-start from 10K training samples. On the left, cumulative reward as a percentage of oracle over time. On the right, final rewards with a vertical line separating online and offline methods. Bandits also offer real advantages beyond raw numbers: cold-start handling, adaptation to preference drift, and continuous exploration."
 
 ## Slide 17: Statistical Significance
 
-"With only 5 seeds, our statistical power is limited but we now have 12 algorithms to compare. The heatmap shows pairwise paired t-test p-values. Random vs everything else is clearly significant. Bandit-vs-CF comparisons are particularly interesting — if significant, they tell us whether the online learning truly matches offline knowledge. The paired design helps control for sequence randomness."
+"With only 5 seeds, our statistical power is limited but we now have 11 algorithms to compare. The heatmap shows pairwise paired t-test p-values. Random vs everything else is clearly significant. Bandit-vs-CF comparisons are particularly interesting — if significant, they tell us whether the online learning truly matches offline knowledge. The paired design helps control for sequence randomness."
 
 ## Slide 18: Example Recommendations
 

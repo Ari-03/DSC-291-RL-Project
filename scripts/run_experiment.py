@@ -16,7 +16,7 @@ from src.feature_engineering import FeatureBuilder
 from src.environment import AnimeRecommendationEnv
 from src.bandits import EpsilonGreedy, DecayingEpsilonGreedy, LinUCB, ThompsonSampling
 from src.bandits.base import ContextualBandit
-from src.baselines import OfflineBaseline, PopularityBaseline, SVDBaseline, UserCFBaseline
+from src.baselines import OfflineBaseline, SVDBaseline, UserCFBaseline
 from src.evaluation import ExperimentTracker, save_results
 
 
@@ -84,7 +84,6 @@ def build_baselines(
         if test_ratings:
             predict_for_anime[u] = set(test_ratings.keys())
     return [
-        PopularityBaseline(rating_map_train),
         SVDBaseline(rating_map_train),
         UserCFBaseline(rating_map_train, predict_for_anime=predict_for_anime),
     ]
