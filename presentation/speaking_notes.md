@@ -1,77 +1,41 @@
 # Speaking Notes — Contextual Bandits for Anime Recommendation
 
-## Slide 1: Title
+## Slide 1: Title (0:30)
 
-"Today I'm presenting my project on contextual bandits for anime recommendation. The core idea is simple: when you're recommending anime to users sequentially, you face a fundamental tradeoff — do you exploit what you already know works, or explore something new that might be even better? I'll show how algorithms from our lecture — LinUCB, Thompson Sampling — handle this tradeoff on real MyAnimeList data, and compare them against collaborative filtering baselines."
+"Today I'm presenting my project on contextual bandits for anime recommendation. The core question: when recommending anime sequentially, how do we balance exploiting known preferences with exploring potentially better options? I'll show how LinUCB and Thompson Sampling handle this on real MyAnimeList data, and compare against collaborative filtering baselines."
 
-## Slide 2: Problem & Motivation
+## Slide 2: Problem & Motivation (2:00)
 
-"Why bandits for recommendation? Think about it — a traditional recommender trains on historical data and deploys a fixed model. If a user mostly watches action anime, it keeps recommending action. It never discovers that this user might also love slice-of-life shows. That's the filter bubble problem. Contextual bandits break this by treating each recommendation as a decision under uncertainty. The explore-exploit table here captures the tension: exploiting means safe, expected rewards; exploring means potentially discovering much better options at the cost of occasional bad recommendations. The key insight from our course is that you don't have to choose — algorithms like LinUCB do both simultaneously through the UCB principle."
+"Why bandits for recommendation? A traditional recommender trains once and deploys a fixed model — if a user watches action anime, it keeps recommending action, creating a filter bubble. Contextual bandits treat each recommendation as a decision under uncertainty. The explore-exploit table captures the tension: exploiting means safe, expected rewards; exploring means discovering better options at the cost of occasional misses. The key insight from our course is that algorithms like LinUCB handle both simultaneously through the UCB principle — no hard tradeoff needed."
 
-## Slide 3: Formulation
+## Slide 3: Formulation (2:00)
 
-"Here's the formal setup, which maps directly to the linear contextual bandit framework from lecture 2. Each round, a user arrives, we present K=50 candidate anime, and we observe the user's rating as reward. The context vector phi(user, anime) is 72-dimensional — I'll detail these features on the next slide. The core assumption is a linear reward model: the expected rating is the dot product of the context with an unknown parameter theta-star. Our goal is to minimize cumulative pseudo-regret — the sum of gaps between the best possible arm and the arm we actually chose. The theoretical bound from lecture is O(d * sqrt(T) * log T), which means regret should grow sublinearly — we'll test this empirically."
+"This maps directly to the linear contextual bandit framework from lecture. Each round, a user arrives, we present K=50 candidate anime, and observe the rating as reward. The 72-dimensional context vector encodes user, anime, and interaction features. The core assumption is a linear reward model — expected rating equals the dot product of context with unknown theta-star. Our goal is minimizing cumulative pseudo-regret, with a theoretical bound of O(d * sqrt(T) * log T) — sublinear regret that we'll verify empirically."
 
-## Slide 4: Data & Features
+## Slide 4: Data & Features (1:30)
 
-"I'm using the MyAnimeList dataset — 5,000 users, about 3,100 anime, and 940K rating interactions. Critically, I split each user's ratings 70/30 into train and test sets. The train set is used for features, CF baselines, and warm-start; the test set provides environment rewards. This prevents data leakage — CF can't just memorize the answers. The 72-dimensional context vector has three blocks: user features like their average score and activity level, anime features including genre multi-hot encodings and metadata, and seven interaction features. Beyond the original genre cosine similarity and score deviation, I added polynomial and cross terms — genre_cos squared, genre_cos times anime score, genre_cos times score deviation, user engagement times anime popularity, and score_dev squared. These give the linear model access to nonlinear patterns without changing the algorithm. The bias term makes the model affine. Rewards are user-centered — I subtract each user's training mean and divide by 10. This removes per-user bias so the linear model learns relative preferences, not absolute ratings. Crucially, this is a semi-synthetic simulator: at each round, I only present anime the user has actually rated in the test set, so I can compute exact regret."
+"I'm using MyAnimeList — 5,000 users, 3,100 anime, 940K interactions split 70/30 per user. Train set provides features and CF baselines; test set provides rewards, preventing data leakage. The 72-dimensional context has user features, anime features including genre encodings, and seven interaction features with polynomial cross-terms. It's a semi-synthetic simulator where we only present anime the user has actually rated, giving us exact regret computation."
 
-## Slide 5: Algorithms
+## Slide 5: Algorithms (2:00)
 
-"All algorithms share the same backbone: online ridge regression with Sherman-Morrison rank-1 updates, which gives us O(d-squared) per step — about 5,200 operations per round with d=72. Epsilon-Greedy is the simplest: flip a coin, explore with probability epsilon, exploit otherwise. Its exploration is undirected. I also added a decaying epsilon-greedy variant where epsilon decreases as 1/sqrt(t) — this explores heavily early and converges to pure exploitation. LinUCB from Li et al. adds an optimism bonus: the UCB term inflates predicted reward in uncertain directions. Thompson Sampling samples theta from the posterior and acts greedily. Both LinUCB and TS direct exploration toward uncertainty, which is why they should outperform epsilon-Greedy."
+"All algorithms share online ridge regression with Sherman-Morrison updates — O(d-squared) per step. Epsilon-Greedy explores randomly with fixed probability — simple but undirected. I also test a decaying variant where epsilon shrinks as 1/sqrt(t). LinUCB adds an optimism bonus that inflates predicted reward in uncertain directions — directed exploration. Thompson Sampling achieves the same effect by sampling from the posterior. Both LinUCB and TS direct exploration toward uncertainty, which is why they should outperform epsilon-greedy."
 
-## Slide 6: Experiment Setup
+## Slide 6: Experiment Setup (1:00)
 
-"50,000 rounds, 50 arms per round — I increased K from 20 to 50 to make the problem harder for Random and give smart algorithms more room to exploit their knowledge. Lambda is set to 0.1 instead of the default 1.0, because with d=72 features the higher regularization was biasing theta too aggressively toward zero. I warm-start all bandit algorithms with ridge regression fitted on 10,000 offline training samples with user-centered rewards — this gives them a head start aligned with the centered reward signal they'll see online. The key methodological improvement: each user's ratings are split 70/30 into train and test. Features, warm-start, and CF baselines use only training data. Rewards come from the held-out 30%. This means CF baselines must generalize — they can't memorize the test set. All algorithms see the exact same user-candidate sequence per seed for fair comparison."
+"50,000 rounds, 50 arms per round, 5 seeds for error bars. All algorithms are warm-started with ridge regression on 10,000 offline samples. The critical methodological choice: 70/30 train/test split per user means CF baselines must generalize — they can't memorize answers. All algorithms see the exact same user-candidate sequence per seed for fair comparison."
 
-## Slide 7: Why Does Random's % of Oracle Depend on K?
+## Slide 7: Cumulative Reward — % of Oracle (2:00)
 
-"Before diving into results, let me explain why K=50 matters. The rating distribution is heavily left-skewed, clustered between 6 and 9. With K=20, the Monte Carlo analysis shows Random achieves about 81% of oracle. But with K=50, the max of 50 samples grows faster than the mean — so Random's oracle percentage drops significantly. This widens the gap where smart algorithms compete. The key insight: with more arms, there's more room for algorithms that can identify the best arm to shine, while random selection gets relatively worse."
+"This is cumulative reward as a percentage of the oracle over time. LinUCB and Thompson Sampling converge to the highest percentages. The warm-start gives all learning algorithms a head start. Random stays flat — it never learns. Fixed epsilon-greedy plateaus due to constant exploration cost, while decaying epsilon-greedy improves over time as exploration diminishes. The shaded bands show standard error across 5 seeds."
 
-## Slide 8: Results — Cumulative Reward (% of Oracle)
+## Slide 8: Regret Growth Rate — log-log (1:30)
 
-"This shows cumulative reward as a percentage of the oracle. With K=50 and the improved features, Random's performance drops compared to the K=20 setting. LinUCB and Thompson Sampling should reach higher percentages thanks to the warm-start, richer interaction features, and lower regularization. The decaying epsilon-greedy is interesting — it should outperform fixed epsilon early on due to heavy exploration, then converge toward exploitation."
+"This is the key slide connecting to theory. On a log-log scale, R(t) = c * t^alpha becomes a straight line with slope alpha. Random has alpha near 1 — linear regret, as expected. LinUCB and TS have alpha around 0.5 to 0.7, confirming sublinear growth matching the O(d*sqrt(T)) bound from lecture. The dashed reference lines show pure sqrt(T) and linear growth for comparison."
 
-## Slide 9: Results — Regret & Learning Dynamics
+## Slide 9: Bandits vs. Collaborative Filtering (1:30)
 
-"On the left, normalized regret — average regret per round. Random stays flat — it never learns. All other algorithms decrease, confirming sublinear cumulative regret. The warm-start means the learning algorithms start with lower regret than they would from scratch. On the right, the sliding-window average reward shows convergence toward higher per-round rewards. The decaying epsilon-greedy is interesting to compare with fixed epsilon — its exploration cost decreases over time unlike the fixed variant."
+"The key comparison: online bandits versus offline CF with a fair train/test split. CF baselines — SVD and UserCF — train on 70% of ratings and must generalize to the held-out 30%. On the left, cumulative reward over time; on the right, final rewards with online and offline methods separated. With fair evaluation, bandits are competitive with CF — and they offer real advantages: cold-start handling, adaptation to preference drift, and continuous exploration that CF cannot provide."
 
-## Slide 10: Regret Growth Rate Analysis (log-log)
+## Slide 10: Conclusion & Future Work (1:30)
 
-"This is the money slide for connecting to theory. On a log-log scale, R(t) = c * t^alpha becomes a straight line with slope alpha. Random has alpha near 1 — linear regret. LinUCB and TS have alpha around 0.5 to 0.7, confirming sublinear growth matching the O(d*sqrt(T)) bound. The decaying epsilon-greedy should also show sublinear regret since its exploration rate goes to zero. The reference lines show pure sqrt(T) and linear growth for comparison."
-
-## Slide 11: Instantaneous Regret Over Time
-
-"Per-round regret smoothed with a 1,000-round moving average. Random is flat — zero learning. LinUCB and TS clearly decrease over time. Fixed epsilon-greedy plateaus above zero due to its constant exploration cost. Decaying epsilon-greedy should show a different pattern — initially high exploration but converging toward zero, similar to LinUCB/TS but through a different mechanism."
-
-## Slide 12: Learned Feature Weights
-
-"What does LinUCB actually learn? These are the top-15 positive and bottom-5 negative weights from theta-hat after 50K rounds. With the richer interaction features, we should see the polynomial terms — especially genre_cos squared and genre_cos times score — carrying significant weight. The model can now capture nonlinear effects like 'high genre overlap AND high anime quality is extra good' through the cross term. This is the ridge regression solution converging to theta-star."
-
-## Slide 13: Confidence Ellipsoid Shrinkage
-
-"This visualizes the core mechanism behind LinUCB with lambda=0.1. On the left, trace of A-inverse drops rapidly. With lower lambda, A-inverse starts larger (1/0.1 = 10 per diagonal element vs 1.0 before), so there's more initial uncertainty but also faster learning from data. On the right, the average UCB bonus term shrinks as the confidence ellipsoid contracts. The transition from exploration to exploitation is gradual, not a hard switch."
-
-## Slide 14: Regret Distribution
-
-"Per-round regret distributions. Random has a wide distribution — high and variable regret. With the warm-start, LinUCB and TS should have distributions even more concentrated near zero compared to before. The key visual: the mass of the LinUCB/TS distributions is compressed near zero, while Random spreads across the full range."
-
-## Slide 15: Hyperparameter Sensitivity
-
-"This bar chart shows final cumulative regret for all algorithm variants including the new LinUCB(alpha=0.1) and decaying epsilon-greedy. With the lower lambda and richer features, we expect LinUCB(alpha=0.1) to potentially outperform alpha=0.5 since the features are more informative and less exploration is needed. The CF baselines appear here too for direct comparison — they should fall between Random and the best bandits."
-
-## Slide 16: Bandits vs. Collaborative Filtering
-
-"Now the key comparison: online bandits vs. offline CF baselines with a fair train/test split. We have two CF methods — SVD-CF (matrix factorization with 100 latent factors) and UserCF (user-based cosine similarity with 50 nearest neighbors). CF baselines are trained on 70% of each user's ratings, and rewards come from the held-out 30%. This is critical — in the previous version, CF trained and tested on the same data, inflating its numbers. With a fair split, CF must generalize. Our bandits learn online with user-centered rewards and a warm-start from 10K training samples. On the left, cumulative reward as a percentage of oracle over time. On the right, final rewards with a vertical line separating online and offline methods. Bandits also offer real advantages beyond raw numbers: cold-start handling, adaptation to preference drift, and continuous exploration."
-
-## Slide 17: Statistical Significance
-
-"With only 5 seeds, our statistical power is limited but we now have 11 algorithms to compare. The heatmap shows pairwise paired t-test p-values. Random vs everything else is clearly significant. Bandit-vs-CF comparisons are particularly interesting — if significant, they tell us whether the online learning truly matches offline knowledge. The paired design helps control for sequence randomness."
-
-## Slide 18: Example Recommendations
-
-"Here's one user and what LinUCB predicts after 1,000 training steps. With the richer features and lower regularization, the model should be more confident and accurate in its predictions. The interaction features help it capture nuanced preferences beyond simple genre matching."
-
-## Slide 19: Conclusion
-
-"Key takeaways. First, sublinear regret is empirically confirmed with the theoretical O(d*sqrt(T)) rate. Second, a proper 70/30 train/test split per user eliminates data leakage — CF baselines must generalize, not memorize. Third, user-centered rewards remove per-user bias so the linear model learns relative preferences. Fourth, structured exploration via UCB or posterior sampling outperforms both fixed and decaying epsilon-greedy. Fifth, with fair evaluation, online bandits are competitive with collaborative filtering, and offer additional advantages for cold-start and non-stationarity. For future work: non-stationary preferences, neural bandits, and real online deployment."
+"The summary table shows final rewards and regret for all algorithms. Key takeaways: sublinear regret is empirically confirmed at the theoretical rate. The train/test split ensures fair CF comparison with no data leakage. Structured exploration via UCB and posterior sampling outperforms epsilon-greedy. And online bandits are competitive with collaborative filtering while offering cold-start and non-stationarity advantages. Future work includes non-stationary bandits, neural reward models, and real online A/B testing."
